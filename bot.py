@@ -54,8 +54,8 @@ from telethon.sessions import StringSession
 #  CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_USERBOTS = max(1, int(os.getenv("MAX_USERBOTS", "50") or 50))
 MAX_SCRIPTS_PER_USER = max(1, int(os.getenv("MAX_SCRIPTS_PER_USER", "3") or 3))
@@ -546,7 +546,7 @@ async def animate_otp_verify(msg):
         except:
             break
 
-async def simulate_button_animation(query, original_keyboard, text="⏳ Processing"):
+async def simulate_button_animation(query, text="⏳ Processing"):
     try:
         loading_kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"{text}...", callback_data="none")]])
         await query.message.edit_reply_markup(reply_markup=loading_kb)
@@ -555,7 +555,7 @@ async def simulate_button_animation(query, original_keyboard, text="⏳ Processi
         pass
 
 # ─────────────────────────────────────────────────────────────────────────
-#  BOT UI HELPERS
+#  BOT UI HELPERS (COLORFUL KEYBOARDS)
 # ─────────────────────────────────────────────────────────────────────────
 
 START_TIME = time.time()
@@ -580,11 +580,11 @@ def _phone_label(acct):
 
 def main_keyboard(uid):
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Deploy New Userbot", callback_data="host")],
-        [InlineKeyboardButton("🎛 Control Panel", callback_data="myaccounts"),
-         InlineKeyboardButton("📈 System Status", callback_data="status")],
-        [InlineKeyboardButton("📚 Guide & Help", callback_data="help"),
-         InlineKeyboardButton("👨‍💻 Support", callback_data="support")],
+        [InlineKeyboardButton("✨ 🚀 Deploy New Userbot ✨", callback_data="host")],
+        [InlineKeyboardButton("🎛️ My Control Panel", callback_data="myaccounts"),
+         InlineKeyboardButton("📊 Live System Status", callback_data="status")],
+        [InlineKeyboardButton("📖 User Guide & Help", callback_data="help"),
+         InlineKeyboardButton("🎧 24/7 Support", callback_data="support")],
     ])
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -962,7 +962,7 @@ async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hosted = [a for a in accounts if a.get("hosted")]
 
     if not hosted:
-        kb = [[InlineKeyboardButton("🚀 Deploy Userbot", callback_data="host")]]
+        kb = [[InlineKeyboardButton("✨ 🚀 Deploy New Userbot ✨", callback_data="host")]]
         await update.message.reply_text(
             f"📭 {bold('No scripts deployed yet')}\n\nClick below to upload and deploy.",
             parse_mode=ParseMode.HTML,
@@ -970,6 +970,7 @@ async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    # Build the dynamic control panel grid with COLORFUL EMOJIS
     for acct in hosted:
         slot = acct["slot"]
         phone = _phone_label(acct)
@@ -983,12 +984,12 @@ async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         kb = [
             [
-                InlineKeyboardButton(f"🔄 Restart", callback_data=f"restart_{slot}"),
-                InlineKeyboardButton(f"▶️ Start" if is_stopped or not is_alive else f"⏹ Stop", callback_data=f"toggle_{slot}"),
+                InlineKeyboardButton(f"♻️ Restart Engine", callback_data=f"restart_{slot}"),
+                InlineKeyboardButton(f"🟢 Start Bot" if is_stopped or not is_alive else f"🛑 Stop Bot", callback_data=f"toggle_{slot}"),
             ],
             [
-                InlineKeyboardButton(f"📄 View Logs", callback_data=f"logs_{slot}"),
-                InlineKeyboardButton(f"🗑️ Delete", callback_data=f"logout_{slot}"),
+                InlineKeyboardButton(f"📝 View Live Logs", callback_data=f"logs_{slot}"),
+                InlineKeyboardButton(f"💥 Delete Userbot", callback_data=f"logout_{slot}"),
             ]
         ]
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
@@ -1035,31 +1036,31 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "host":
-        await simulate_button_animation(query, query.message.reply_markup, "🚀 Preparing")
+        await simulate_button_animation(query, "🚀 Preparing")
         await query.message.delete()
         await query.message.reply_text("📤 Use /host to upload and deploy your script.")
         return
 
     if data == "myaccounts":
-        await simulate_button_animation(query, query.message.reply_markup, "🎛 Loading")
+        await simulate_button_animation(query, "🎛 Loading")
         await query.message.delete()
         await cmd_myaccounts(update, context)
         return
 
     if data == "status":
-        await simulate_button_animation(query, query.message.reply_markup, "📊 Fetching")
+        await simulate_button_animation(query, "📊 Fetching")
         await query.message.delete()
         await cmd_status(update, context)
         return
 
     if data == "help":
-        await simulate_button_animation(query, query.message.reply_markup, "❓ Loading")
+        await simulate_button_animation(query, "❓ Loading")
         await query.message.delete()
         await cmd_help(update, context)
         return
 
     if data == "support":
-        await simulate_button_animation(query, query.message.reply_markup, "📞 Loading")
+        await simulate_button_animation(query, "📞 Loading")
         await query.message.delete()
         await cmd_support(update, context)
         return
@@ -1070,7 +1071,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not acct:
             return await query.message.reply_text("❌ Script not found.")
         
-        await simulate_button_animation(query, query.message.reply_markup, "🔄 Restarting")
+        await simulate_button_animation(query, "♻️ Restarting")
         acct["is_stopped"] = False
         add_account(uid, acct)
         
@@ -1092,13 +1093,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         is_alive = is_running(uid, slot)
         if is_alive:
-            await simulate_button_animation(query, query.message.reply_markup, "⏹ Stopping")
+            await simulate_button_animation(query, "🛑 Stopping")
             stop_script(uid, slot)
             acct["is_stopped"] = True
             add_account(uid, acct)
             await query.message.reply_text(f"⏸ Userbot #{slot+1} stopped. Auto-restart disabled.")
         else:
-            await simulate_button_animation(query, query.message.reply_markup, "▶️ Starting")
+            await simulate_button_animation(query, "🟢 Starting")
             acct["is_stopped"] = False
             add_account(uid, acct)
             root = script_root(uid, slot)
@@ -1114,7 +1115,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         slot = int(data.split("_")[1])
         log_path = script_root(uid, slot) / "runtime.log"
         
-        await simulate_button_animation(query, query.message.reply_markup, "📄 Fetching")
+        await simulate_button_animation(query, "📝 Fetching")
         
         if log_path.exists():
             with open(log_path, "r", encoding="utf-8") as f:
@@ -1139,11 +1140,11 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         phone = _phone_label(acct)
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Confirm Deletion", callback_data=f"confirm_logout_{slot}")],
-            [InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")],
+            [InlineKeyboardButton("✅ Yes, Delete it!", callback_data=f"confirm_logout_{slot}")],
+            [InlineKeyboardButton("❌ No, Keep it!", callback_data="cancel_action")],
         ])
         await query.message.reply_text(
-            f"⚠️ Are you sure you want to delete and stop <code>{esc(phone)}</code>?",
+            f"⚠️ Are you sure you want to completely delete <code>{esc(phone)}</code>?",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
