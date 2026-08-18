@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-PURE HOSTER — Userbot script hoster with animated flow
+SID HOSTER — Userbot script hoster with animated flow
 Combines Telethon login with user-provided scripts.
 
 Environment variables:
@@ -399,7 +399,7 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
         cwd=str(root),
         env=env,
         stdout=log_file,
-        stderr=subprocess.STDOUT, # Merge stderr into stdout for combined logs
+        stderr=subprocess.STDOUT,
         stdin=subprocess.DEVNULL,
     )
     
@@ -505,12 +505,26 @@ async def animate_otp_verify(msg):
         except:
             break
 
-async def simulate_button_animation(query, original_keyboard, text="⏳ Processing"):
+async def simulate_button_animation(query, original_keyboard=None, text="⏳ Processing"):
+    """
+    Temporarily replace the button with a loading state, then restore the original after a short delay.
+    If original_keyboard is None, it will try to read the current reply_markup and restore it.
+    """
     try:
+        # Store the original keyboard if not provided
+        if original_keyboard is None:
+            original_keyboard = query.message.reply_markup
+        
+        # Create a temporary loading keyboard
         loading_kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"{text}...", callback_data="none")]])
         await query.message.edit_reply_markup(reply_markup=loading_kb)
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.5)  # brief loading effect
+        
+        # Restore original keyboard if it exists
+        if original_keyboard:
+            await query.message.edit_reply_markup(reply_markup=original_keyboard)
     except:
+        # If anything fails, just ignore and continue
         pass
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -563,7 +577,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running = [a for a in hosted if is_running(uid, a["slot"])]
 
     text = (
-        f"{TOP}\n║  🚀  {bold('PURE HOSTER CLOUD')}  🚀  ║\n{BOTTOM}\n\n"
+        f"{TOP}\n║  🚀  {bold('SID HOSTER')}  🚀  ║\n{BOTTOM}\n\n"
         f"👋 Welcome, {esc(update.effective_user.first_name or 'User')}!\n"
         f"{DIV}\n"
         f"📦 Hosted Scripts: {len(hosted)}/{MAX_SCRIPTS_PER_USER}\n"
@@ -692,6 +706,51 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Scan failed: {esc(result.get('reason', 'Unknown'))}")
         return ConversationHandler.END
 
+    # ────────── NEW AUTO-DEPENDENCY LOGIC ──────────
+    req_path = root / "requirements.txt"
+    if not req_path.exists() and result.get("imports"):
+        try:
+            std_libs = set(sys.stdlib_module_names)
+        except AttributeError:
+            # Fallback for older Python versions
+            std_libs = {
+                'os', 'sys', 'time', 'json', 're', 'asyncio', 'logging', 'hashlib', 'threading', 
+                'math', 'random', 'datetime', 'collections', 'pathlib', 'subprocess', 'shutil', 
+                'typing', 'zipfile', 'ast', 'html', 'sqlite3', 'urllib', 'base64', 'binascii',
+                'socket', 'ssl', 'tempfile', 'uuid', 'warnings', 'io', 'functools', 'itertools',
+                'string', 'struct', 'traceback', 'types', 'weakref', 'abc', 'argparse', 'contextlib'
+            }
+        
+        third_party = []
+        for imp in result["imports"]:
+            imp_name = imp.split(".")[0] # Just the base module
+            if imp_name not in std_libs and not imp_name.startswith("_") and imp_name != entry.stem:
+                # Map common aliases to their official PyPI package names
+                if imp_name == "bs4":
+                    third_party.append("beautifulsoup4")
+                elif imp_name == "telethon":
+                    third_party.append("Telethon")
+                elif imp_name == "pyrogram":
+                    third_party.append("Pyrogram")
+                elif imp_name == "telegram":
+                    third_party.append("python-telegram-bot")
+                elif imp_name == "cv2":
+                    third_party.append("opencv-python")
+                elif imp_name == "PIL":
+                    third_party.append("Pillow")
+                elif imp_name == "yaml":
+                    third_party.append("PyYAML")
+                else:
+                    third_party.append(imp_name)
+                    
+        # Remove duplicates
+        third_party = list(set(third_party))
+        
+        if third_party:
+            with open(req_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(third_party))
+    # ───────────────────────────────────────────────
+
     context.user_data["pending_slot"] = slot
     context.user_data["pending_entry"] = str(entry.relative_to(root))
     context.user_data["pending_name"] = name
@@ -704,7 +763,7 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "entrypoint": str(entry.relative_to(root)),
         "phone": phone,
         "hosted": False,
-        "is_stopped": False, # New 24/7 logic watchdog state
+        "is_stopped": False,
         "uploaded_at": int(time.time()),
         "has_requirements": (root / "requirements.txt").exists(),
         "imports": result["imports"],
@@ -962,32 +1021,35 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         return
 
+    # Store original keyboard for restoration after animation
+    original_kb = query.message.reply_markup
+
     if data == "host":
-        await simulate_button_animation(query, query.message.reply_markup, "🚀 Preparing")
+        await simulate_button_animation(query, original_kb, "🚀 Preparing")
         await query.message.delete()
         await query.message.reply_text("📤 Use /host to upload and deploy your script.")
         return
 
     if data == "myaccounts":
-        await simulate_button_animation(query, query.message.reply_markup, "🎛 Loading")
+        await simulate_button_animation(query, original_kb, "🎛 Loading")
         await query.message.delete()
         await cmd_myaccounts(update, context)
         return
 
     if data == "status":
-        await simulate_button_animation(query, query.message.reply_markup, "📊 Fetching")
+        await simulate_button_animation(query, original_kb, "📊 Fetching")
         await query.message.delete()
         await cmd_status(update, context)
         return
 
     if data == "help":
-        await simulate_button_animation(query, query.message.reply_markup, "❓ Loading")
+        await simulate_button_animation(query, original_kb, "❓ Loading")
         await query.message.delete()
         await cmd_help(update, context)
         return
 
     if data == "support":
-        await simulate_button_animation(query, query.message.reply_markup, "📞 Loading")
+        await simulate_button_animation(query, original_kb, "📞 Loading")
         await query.message.delete()
         await cmd_support(update, context)
         return
@@ -999,7 +1061,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not acct:
             return await query.message.reply_text("❌ Script not found.")
         
-        await simulate_button_animation(query, query.message.reply_markup, "🔄 Restarting")
+        await simulate_button_animation(query, original_kb, "🔄 Restarting")
         acct["is_stopped"] = False
         add_account(uid, acct) # Save state
         
@@ -1023,14 +1085,14 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         is_alive = is_running(uid, slot)
         if is_alive:
             # STOP ACTION
-            await simulate_button_animation(query, query.message.reply_markup, "⏹ Stopping")
+            await simulate_button_animation(query, original_kb, "⏹ Stopping")
             stop_script(uid, slot)
             acct["is_stopped"] = True
             add_account(uid, acct)
             await query.message.reply_text(f"⏸ Userbot #{slot+1} stopped. Auto-restart disabled.")
         else:
             # START ACTION
-            await simulate_button_animation(query, query.message.reply_markup, "▶️ Starting")
+            await simulate_button_animation(query, original_kb, "▶️ Starting")
             acct["is_stopped"] = False
             add_account(uid, acct)
             root = script_root(uid, slot)
@@ -1047,7 +1109,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         slot = int(data.split("_")[1])
         log_path = script_root(uid, slot) / "runtime.log"
         
-        await simulate_button_animation(query, query.message.reply_markup, "📄 Fetching")
+        await simulate_button_animation(query, original_kb, "📄 Fetching")
         
         if log_path.exists():
             with open(log_path, "r", encoding="utf-8") as f:
@@ -1266,7 +1328,7 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
         for acct in get_accounts(uid):
             if not acct.get("hosted") or not acct.get("session_string"):
                 continue
-            if acct.get("is_stopped"): # Respect manual stops
+            if acct.get("is_stopped"):
                 continue
                 
             slot = acct["slot"]
@@ -1357,7 +1419,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(auto_health_check, interval=60, first=30)
 
-    logging.info("🚀 Pure Hoster Cloud Started")
+    logging.info("🚀 SID HOSTER started with animations")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
