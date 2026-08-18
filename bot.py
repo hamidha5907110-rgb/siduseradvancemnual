@@ -61,8 +61,8 @@ from telegram.ext import (
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_RUNNING = max(1, int(os.getenv("MAX_RUNNING", "50") or 50))
 FREE_SCRIPT_LIMIT = max(1, int(os.getenv("FREE_SCRIPT_LIMIT", "3") or 3))
@@ -291,6 +291,7 @@ PROCS: Dict[Tuple[int, int], asyncio.subprocess.Process] = {}
 START_TIMES: Dict[Tuple[int, int], float] = {}
 PROC_LOGS: Dict[Tuple[int, int], Path] = {}
 LOG_HANDLES: Dict[Tuple[int, int], Any] = {}
+INPUT_PIPES: Dict[Tuple[int, int], Any] = {}
 PROC_LOCK = asyncio.Lock()
 SCRIPT_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 
@@ -439,6 +440,12 @@ async def stop_script(uid: int, slot: int) -> bool:
     proc = PROCS.pop(key, None)
     START_TIMES.pop(key, None)
     handle = LOG_HANDLES.pop(key, None)
+    input_pipe = INPUT_PIPES.pop(key, None)
+    if input_pipe:
+        try:
+            input_pipe.close()
+        except Exception:
+            pass
     if handle:
         try: handle.flush()
         except Exception: pass
@@ -537,7 +544,7 @@ async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
         lf = logfile.open("a", encoding="utf-8", buffering=1)
         kwargs = dict(
             cwd=str(root), env=env,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE,
             stdout=lf, stderr=lf,
         )
         if os.name != "nt":
@@ -551,41 +558,32 @@ async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
             lf.close()
             return False, f"Launch failed: {str(exc)[:240]}"
 
-        # Real startup health check instead of only checking 350 ms.
-        await asyncio.sleep(0.8)
-        if proc.returncode is not None:
-            try:
-                await proc.wait()
-            except Exception:
-                pass
-            try: lf.close()
-            except Exception: pass
-            LOG_HANDLES.pop((uid, slot), None)
-            count = recent_failures + 1
-            err_tail = read_log_tail(uid, slot, 18)
-            replace_script(uid, {**item, "status": "crashed", "crash_count": count, "last_exit": int(time.time()), "last_error": err_tail})
-            return False, f"Process exited during startup (code {proc.returncode}).\n\n{err_tail[-1800:]}"
-
         key = (uid, slot)
         PROCS[key] = proc
         START_TIMES[key] = time.time()
         PROC_LOGS[key] = logfile
         LOG_HANDLES[key] = lf
-        replace_script(uid, {**item, "status": "starting", "last_started": int(time.time())})
+        if proc.stdin:
+            INPUT_PIPES[key] = proc.stdin
+        replace_script(uid, {**item, "status": "running", "last_started": int(time.time()), "crash_count": 0, "last_error": ""})
 
-        await asyncio.sleep(max(1, STARTUP_HEALTH_SECONDS - 1))
+        # IMPORTANT: do not execute a second startup/health test.
+        # Userbots may legitimately wait for interactive input such as OTP/2FA.
+        # The previous health probe started them with stdin=DEVNULL, causing
+        # input() to raise EOFError and making valid manual userbots fail.
+        await asyncio.sleep(0.5)
         if proc.returncode is not None:
             PROCS.pop(key, None)
             START_TIMES.pop(key, None)
+            INPUT_PIPES.pop(key, None)
             try: lf.close()
             except Exception: pass
-            LOG_HANDLES.pop((uid, slot), None)
+            LOG_HANDLES.pop(key, None)
             count = recent_failures + 1
             err_tail = read_log_tail(uid, slot, 18)
-            replace_script(uid, {**item, "status": "crashed", "crash_count": count, "last_exit": int(time.time()), "last_error": err_tail})
-            return False, f"Startup health check failed (code {proc.returncode}).\n\n{err_tail[-1800:]}"
+            replace_script(uid, {**item, "status": "stopped", "crash_count": count, "last_exit": int(time.time()), "last_error": err_tail})
+            return False, f"Process exited immediately (code {proc.returncode}).\n\n{err_tail[-1800:]}"
 
-        replace_script(uid, {**item, "status": "running", "last_started": int(time.time()), "crash_count": 0, "last_error": ""})
         return True, "Running"
 
 
@@ -1148,6 +1146,39 @@ async def setapi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             await update.message.reply_text("❌ Invalid API ID/API hash format.")
 
+async def sendinput_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    if len(context.args) < 2:
+        await update.message.reply_text(
+            "⌨️ <b>Interactive Input</b>\n\n"
+            "Usage: <code>/sendinput SCRIPT_NUMBER YOUR_CODE</code>\n\n"
+            "This forwards one line to the hosted script's standard input.\n"
+            "Useful for scripts that ask interactively for OTP/2FA or other manual values.",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+    try:
+        slot = int(context.args[0]) - 1
+    except ValueError:
+        await update.message.reply_text("❌ Invalid script number.")
+        return
+    if not find_script(uid, slot):
+        await update.message.reply_text("❌ Script not found.")
+        return
+    pipe = INPUT_PIPES.get((uid, slot))
+    proc = PROCS.get((uid, slot))
+    if not pipe or not proc or proc.returncode is not None:
+        await update.message.reply_text("❌ That script is not running or is not waiting for input.")
+        return
+    value = " ".join(context.args[1:])
+    try:
+        pipe.write((value + "\n").encode("utf-8"))
+        await pipe.drain()
+        await update.message.reply_text(f"✅ Input sent to <b>#{slot+1}</b>.", parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Could not send input: <code>{esc(str(exc)[:180])}</code>", parse_mode=ParseMode.HTML)
+
+
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     items = get_scripts(uid)
@@ -1233,7 +1264,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await animate(msg, ["🚀 Preparing `▱▱▱`", "📦 Launching `▰▱▱`", "⚡ Checking `▰▰▰`"])
         ok, detail = await start_script(uid, slot)
         if ok:
-            await msg.edit_text(f"✅ <b>Hosted successfully</b>\n\nScript <b>#{slot+1}</b> is running.", parse_mode=ParseMode.HTML)
+            await msg.edit_text(f"✅ <b>Hosted successfully</b>\n\nScript <b>#{slot+1}</b> is running.\n\n⌨️ For scripts that request manual input, use <code>/sendinput {slot+1} YOUR_CODE</code>.", parse_mode=ParseMode.HTML)
         else:
             await msg.edit_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
         return
@@ -1412,6 +1443,7 @@ async def post_init(app: Application) -> None:
         ("start", "Open hoster"),
         ("host", "Upload your userbot script"),
         ("status", "View hosted scripts"),
+        ("sendinput", "Send input to a running script"),
         ("restart", "Restart a script"),
         ("logout", "Stop and remove a script"),
         ("referral", "Refer & earn Premium"),
@@ -1446,6 +1478,7 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("logs", logs_command))
     app.add_handler(CommandHandler("setapi", setapi))
     app.add_handler(CommandHandler("status", status_command))
+    app.add_handler(CommandHandler("sendinput", sendinput_command))
     app.add_handler(CommandHandler("restart", restart_command))
     app.add_handler(CommandHandler("logout", logout_command))
     app.add_handler(upload_conv)
