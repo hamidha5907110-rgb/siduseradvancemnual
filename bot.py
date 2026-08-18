@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """
-PURE HOSTER — Userbot script hoster
-Combines the reliability of Telethon login with user‑provided scripts.
-All the power, none of the bloat.
+PURE HOSTER — Userbot script hoster with animated flow
+Combines Telethon login with user‑provided scripts.
 
 Environment variables:
   BOT_TOKEN          required
@@ -16,7 +15,6 @@ Environment variables:
 
 import asyncio
 import ast
-import base64
 import hashlib
 import html
 import json
@@ -24,7 +22,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import threading
@@ -33,13 +30,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-import requests
-from telegram import (
-    BotCommand,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -63,9 +54,9 @@ from telethon.sessions import StringSession
 #  CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@fxrsale").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_USERBOTS = max(1, int(os.getenv("MAX_USERBOTS", "50") or 50))
 MAX_SCRIPTS_PER_USER = max(1, int(os.getenv("MAX_SCRIPTS_PER_USER", "3") or 3))
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "2040"))
@@ -218,7 +209,7 @@ def is_blocked(uid):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  SCRIPT SCANNER (from first script)
+#  SCRIPT SCANNER
 # ─────────────────────────────────────────────────────────────────────────
 
 API_ID_NAMES = {"API_ID", "api_id", "TG_API_ID", "TELEGRAM_API_ID", "CLIENT_API_ID"}
@@ -376,7 +367,7 @@ def find_entrypoint(root: Path) -> Optional[Path]:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  SUBPROCESS RUNNER (for user scripts)
+#  SUBPROCESS RUNNER
 # ─────────────────────────────────────────────────────────────────────────
 
 _procs: Dict[Tuple[int, int], subprocess.Popen] = {}
@@ -406,7 +397,6 @@ def start_script(uid: int, slot: int, script_path: Path, session_string: str, ap
     key = (uid, slot)
     stop_script(uid, slot)
 
-    # Create a venv for this script if requirements exist
     root = script_path.parent
     venv_dir = root / ".venv"
     python_exe = venv_dir / "bin" / "python" if os.name != "nt" else venv_dir / "Scripts" / "python.exe"
@@ -441,7 +431,7 @@ def start_script(uid: int, slot: int, script_path: Path, session_string: str, ap
         env=env,
         stdout=log_file,
         stderr=log_file,
-        stdin=subprocess.DEVNULL,  # no interactive input needed
+        stdin=subprocess.DEVNULL,
     )
     _procs[key] = proc
     _start_times[key] = time.time()
@@ -490,7 +480,7 @@ def stop_all_for_user(uid):
 
 
 # ─────────────────────────────────────────────────────────────────────────
-#  FONT STYLES
+#  FONT & STYLE HELPERS
 # ─────────────────────────────────────────────────────────────────────────
 
 def bold(t: str) -> str:
@@ -512,6 +502,69 @@ def esc(t: str) -> str:
 DIV = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 TOP = "╔══════════════════════════╗"
 BOTTOM = "╚══════════════════════════╝"
+
+
+# ─────────────────────────────────────────────────────────────────────────
+#  ANIMATION HELPERS
+# ─────────────────────────────────────────────────────────────────────────
+
+async def animate_scanning(msg, steps=6, delay=0.15):
+    """Animate a scanning progress bar."""
+    frames = [
+        "🔎 Scanning `▱▱▱▱▱`",
+        "🔎 Scanning `▰▱▱▱▱`",
+        "🔎 Scanning `▰▰▱▱▱`",
+        "🔎 Scanning `▰▰▰▱▱`",
+        "🔎 Scanning `▰▰▰▰▱`",
+        "🔎 Scanning `▰▰▰▰▰`",
+    ]
+    for frame in frames[:steps]:
+        try:
+            await msg.edit_text(frame, parse_mode=ParseMode.HTML)
+            await asyncio.sleep(delay)
+        except:
+            break
+
+
+async def animate_connecting(msg):
+    frames = [
+        "📡 Connecting `▱▱▱`",
+        "📡 Connecting `▰▱▱`",
+        "📡 Connecting `▰▰▱`",
+        "📡 Connecting `▰▰▰`",
+    ]
+    for frame in frames:
+        try:
+            await msg.edit_text(frame, parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.15)
+        except:
+            break
+
+
+async def animate_deploy(msg):
+    frames = [
+        "🚀 Deploying `▱▱▱`",
+        "🚀 Deploying `▰▱▱`",
+        "🚀 Deploying `▰▰▱`",
+        "🚀 Deploying `▰▰▰`",
+    ]
+    for frame in frames:
+        try:
+            await msg.edit_text(frame, parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.12)
+        except:
+            break
+
+
+async def animate_otp_verify(msg):
+    frames = ["🔐 Verifying OTP `·`", "🔐 Verifying OTP `··`", "🔐 Verifying OTP `···`"]
+    for frame in frames:
+        try:
+            await msg.edit_text(frame, parse_mode=ParseMode.HTML)
+            await asyncio.sleep(0.2)
+        except:
+            break
+
 
 # ─────────────────────────────────────────────────────────────────────────
 #  BOT HELPERS
@@ -645,7 +698,6 @@ async def host_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await reply(f"😔 All slots full. Contact {SUPPORT_USERNAME}")
         return ConversationHandler.END
 
-    # Cleanup any previous pending login
     pending_logins.pop(uid, None)
 
     await reply(
@@ -674,6 +726,10 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ File exceeds {MAX_UPLOAD_MB} MB.")
         return UPLOAD_WAIT_FILE
 
+    # Start scanning animation
+    msg = await update.message.reply_text("🔎 Scanning `▱▱▱▱▱`", parse_mode=ParseMode.HTML)
+    await animate_scanning(msg)
+
     # Determine slot
     accounts = get_accounts(uid)
     existing_slots = {a.get("slot") for a in accounts}
@@ -691,31 +747,30 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Extract if zip
     if name.lower().endswith(".zip"):
-        ok, msg = safe_extract_zip(incoming, root)
+        ok, zmsg = safe_extract_zip(incoming, root)
         try:
             incoming.unlink()
         except:
             pass
         if not ok:
             shutil.rmtree(root, ignore_errors=True)
-            await update.message.reply_text(f"❌ {esc(msg)}")
+            await msg.edit_text(f"❌ {esc(zmsg)}")
             return ConversationHandler.END
     else:
-        # single .py file, rename to main.py
         shutil.move(str(incoming), str(root / "main.py"))
 
     # Find entrypoint
     entry = find_entrypoint(root)
     if not entry:
         shutil.rmtree(root, ignore_errors=True)
-        await update.message.reply_text("❌ No Python entrypoint found (main.py or single .py).")
+        await msg.edit_text("❌ No Python entrypoint found (main.py or single .py).")
         return ConversationHandler.END
 
     # Scan
     result = scan_script(entry)
     if not result.get("ok"):
         shutil.rmtree(root, ignore_errors=True)
-        await update.message.reply_text(f"❌ Scan failed: {esc(result.get('reason', 'Unknown'))}")
+        await msg.edit_text(f"❌ Scan failed: {esc(result.get('reason', 'Unknown'))}")
         return ConversationHandler.END
 
     # Store scan info
@@ -724,14 +779,13 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["pending_name"] = name
     context.user_data["scan_result"] = result
 
-    # Save script metadata (without session yet)
     phone = result.get("phone")
     account_data = {
         "slot": slot,
         "name": name,
         "entrypoint": str(entry.relative_to(root)),
         "phone": phone,
-        "hosted": False,  # will be set after login
+        "hosted": False,
         "uploaded_at": int(time.time()),
         "has_requirements": (root / "requirements.txt").exists(),
         "imports": result["imports"],
@@ -739,15 +793,26 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "api_hash": result.get("api_hash"),
         "warnings": result.get("warnings", []),
     }
-    # We'll add the account only after login success; but we can store temporary data
     context.user_data["account_data"] = account_data
 
-    # Now ask for phone or use detected
+    # Show scan summary
+    summary = (
+        f"✅ {bold('Script scanned successfully')}\n"
+        f"{DIV}\n"
+        f"📄 Name: <code>{esc(name)}</code>\n"
+        f"📦 Size: {result['size']:,} bytes\n"
+        f"🔐 SHA: <code>{result['sha256'][:16]}…</code>\n"
+        f"📱 Phone: {f'<code>{esc(phone)}</code>' if phone else 'Not detected'}\n"
+        f"📦 Imports: {len(result['imports'])} detected\n"
+    )
+    if result.get("warnings"):
+        summary += f"⚠️ Warnings: {', '.join(result['warnings'])}\n"
+
+    await msg.edit_text(summary, parse_mode=ParseMode.HTML)
+
     if phone:
-        # Use detected phone; proceed to login
-        await update.message.reply_text(
-            f"📱 Phone detected: <code>{esc(phone)}</code>\n"
-            f"🚀 Starting login...",
+        await msg.edit_text(
+            f"{summary}\n\n📱 Phone detected, proceeding to login...",
             parse_mode=ParseMode.HTML,
         )
         return await _start_telethon_login(update, context, uid, slot, phone)
@@ -775,6 +840,8 @@ async def host_got_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _start_telethon_login(update, context, uid, slot, phone):
     msg = await update.message.reply_text(f"⏳ Sending OTP to {esc(phone)}...")
+    await animate_connecting(msg)
+
     try:
         client = TelegramClient(StringSession(), TELEGRAM_API_ID, TELEGRAM_API_HASH)
         await client.connect()
@@ -813,14 +880,16 @@ async def host_got_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     hash_ = pending["phone_code_hash"]
     slot = pending["slot"]
 
-    msg = await update.message.reply_text("🔐 Verifying OTP...")
+    msg = await update.message.reply_text("🔐 Verifying OTP `·`", parse_mode=ParseMode.HTML)
+    await animate_otp_verify(msg)
+
     try:
         await client.sign_in(phone, code, phone_code_hash=hash_)
         session_string = client.session.save()
         await client.disconnect()
         pending_logins.pop(uid, None)
 
-        # Now we have session – deploy the script
+        await msg.edit_text("✅ OTP verified! Deploying script...")
         return await _deploy_script(update, context, uid, slot, session_string, phone)
 
     except SessionPasswordNeededError:
@@ -852,12 +921,15 @@ async def host_got_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     slot = pending["slot"]
     phone = pending["phone"]
 
-    msg = await update.message.reply_text("🔐 Verifying 2FA...")
+    msg = await update.message.reply_text("🔐 Verifying 2FA `·`", parse_mode=ParseMode.HTML)
+    await animate_otp_verify(msg)
+
     try:
         await client.sign_in(password=password)
         session_string = client.session.save()
         await client.disconnect()
         pending_logins.pop(uid, None)
+        await msg.edit_text("✅ 2FA verified! Deploying script...")
         return await _deploy_script(update, context, uid, slot, session_string, phone)
     except Exception as e:
         await msg.edit_text(f"❌ Wrong 2FA: {esc(str(e)[:120])}")
@@ -865,7 +937,6 @@ async def host_got_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _deploy_script(update, context, uid, slot, session_string, phone):
-    # Retrieve account data
     account_data = context.user_data.get("account_data")
     if not account_data:
         await update.message.reply_text("❌ Script data lost. Re-upload.")
@@ -876,16 +947,18 @@ async def _deploy_script(update, context, uid, slot, session_string, phone):
     account_data["hosted_at"] = int(time.time())
     account_data["phone"] = phone
 
-    # Save to db
     add_account(uid, account_data)
 
-    # Launch the script
+    # Launch the script with animation
+    msg = await update.message.reply_text("🚀 Deploying `▱▱▱`", parse_mode=ParseMode.HTML)
+    await animate_deploy(msg)
+
     root = script_root(uid, slot)
     entry = root / account_data["entrypoint"]
-    ok, msg = start_script(uid, slot, entry, session_string, TELEGRAM_API_ID, TELEGRAM_API_HASH, phone)
+    ok, result_msg = start_script(uid, slot, entry, session_string, TELEGRAM_API_ID, TELEGRAM_API_HASH, phone)
 
     if ok:
-        await update.message.reply_text(
+        await msg.edit_text(
             f"{TOP}\n║  🎉  {bold('Deploy Successful')}  🎉  ║\n{BOTTOM}\n\n"
             f"✅ Script <code>{esc(account_data['name'])}</code> is now running.\n"
             f"📱 Phone: <code>{esc(phone)}</code>\n"
@@ -896,7 +969,7 @@ async def _deploy_script(update, context, uid, slot, session_string, phone):
             parse_mode=ParseMode.HTML,
         )
     else:
-        await update.message.reply_text(f"❌ Launch failed: {esc(msg)}")
+        await msg.edit_text(f"❌ Launch failed: {esc(result_msg)}")
 
     return ConversationHandler.END
 
@@ -1005,7 +1078,6 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _do_restart(update, uid, slot, hosted[0])
         return
 
-    # multiple: show selection
     keyboard = []
     for acct in hosted:
         slot = acct["slot"]
@@ -1022,7 +1094,7 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def _do_restart(update, uid, slot, acct):
     msg = await update.message.reply_text(f"🔄 Restarting #{slot+1}...")
-    # Stop and start
+    await animate_deploy(msg)  # reuse deploy animation
     stop_script(uid, slot)
     root = script_root(uid, slot)
     entry = root / acct["entrypoint"]
@@ -1094,7 +1166,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "myaccounts":
-        # Refresh /myaccounts via command
         await cmd_myaccounts(update, context)
         return
 
@@ -1132,18 +1203,19 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Script not found.")
             return
         # start a stopped script
+        msg = await query.message.reply_text(f"▶️ Starting #{slot+1}...")
         root = script_root(uid, slot)
         entry = root / acct["entrypoint"]
         session = acct.get("session_string")
         phone = acct.get("phone", "")
         if not session:
-            await query.message.reply_text("❌ No session. Re‑deploy.")
+            await msg.edit_text("❌ No session. Re‑deploy.")
             return
         ok, detail = start_script(uid, slot, entry, session, TELEGRAM_API_ID, TELEGRAM_API_HASH, phone)
         if ok:
-            await query.message.reply_text(f"✅ #{slot+1} started.")
+            await msg.edit_text(f"✅ #{slot+1} started.")
         else:
-            await query.message.reply_text(f"❌ Start failed: {esc(detail)}")
+            await msg.edit_text(f"❌ Start failed: {esc(detail)}")
         return
 
     if data.startswith("logout_"):
@@ -1155,7 +1227,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not acct:
             await query.message.reply_text("❌ Script not found.")
             return
-        # confirm
         phone = _phone_label(acct)
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("✅ Confirm Logout", callback_data=f"confirm_logout_{slot}")],
@@ -1461,7 +1532,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(auto_health_check, interval=120, first=30)
 
-    logging.info("🤖 Pure Hoster Bot started")
+    logging.info("🤖 Pure Hoster Bot started with animations")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
