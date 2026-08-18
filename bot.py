@@ -1106,7 +1106,7 @@ async def receive_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return UPLOAD_WAIT_API_ID
 
-    # API already available – proceed to auth or start
+    # API already available – proceed to auth (always)
     return await proceed_after_upload(update, context, uid, slot, result, name, api_state)
 
 
@@ -1149,7 +1149,7 @@ async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 async def proceed_after_upload(update: Update, context: ContextTypes.DEFAULT_TYPE,
                                uid: int, slot: int, result: dict, name: str, api_state: str) -> int:
-    """After API is ready, decide whether to start auth or run script directly."""
+    """After API is ready, ALWAYS go through interactive auth (phone/OTP/2FA)."""
     item = find_script(uid, slot)
     if not item:
         await update.effective_message.reply_text("❌ Script entry lost.", parse_mode=ParseMode.HTML)
@@ -1159,36 +1159,7 @@ async def proceed_after_upload(update: Update, context: ContextTypes.DEFAULT_TYP
     if result.get("warnings"):
         warn_text = "\n⚠️ <b>Scanner notes:</b>\n" + "\n".join(f"• {esc(x)}" for x in result["warnings"])
 
-    # If the script does NOT need interactive auth, just start it.
-    if not item.get("interactive_auth"):
-        msg = await update.effective_message.reply_text(
-            f"🚀 <b>Launching your script directly...</b>",
-            parse_mode=ParseMode.HTML,
-        )
-        await animate(msg, [
-            "🚀 Starting `▱▱▱`",
-            "📦 Preparing `▰▱▱`",
-            "⚡ Running `▰▰▰`",
-        ], delay=0.1)
-        ok, detail = await start_script(uid, slot)
-        if ok:
-            await msg.edit_text(
-                f"✅ <b>Script hosted and running</b>\n\n"
-                f"📄 <code>{esc(name)}</code>\n"
-                f"📦 {result['size']:,} bytes\n"
-                f"🔐 {api_state}\n"
-                f"{warn_text}\n\n"
-                f"Use <code>/status</code> to monitor.",
-                parse_mode=ParseMode.HTML,
-            )
-        else:
-            await msg.edit_text(
-                f"❌ <b>Host failed</b>\n\n{esc(detail)}",
-                parse_mode=ParseMode.HTML,
-            )
-        return ConversationHandler.END
-
-    # Interactive auth required – proceed to phone/OTP/2FA flow
+    # Always go interactive – even if the scanner didn't detect auth markers.
     if item.get("phone"):
         # Phone already detected – start script and go to OTP state
         msg = await update.effective_message.reply_text(
@@ -1437,7 +1408,7 @@ async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 # ---------------------------------------------------------------------------
-# CALLBACKS (unchanged, but "host:" now handled by conversation)
+# CALLBACKS (unchanged)
 # ---------------------------------------------------------------------------
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1484,15 +1455,12 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             return
         await q.message.reply_text("🚪 <b>Select the hosted script to stop & remove:</b>", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "logout"))
         return
-    # The "host:" callback is now handled by the integrated conversation; we keep it for manual re‑host if desired.
     if data.startswith("host:"):
         slot = int(data.split(":", 1)[1])
         item = find_script(uid, slot)
         if not item:
             await q.message.reply_text("❌ Script not found.")
             return
-        # We can re‑use the auth flow by starting the conversation manually.
-        # For simplicity, we just call start_script directly (no interactive auth) because the user can use /sendinput.
         await q.message.reply_text("🚀 Starting… (use /sendinput if interactive)", parse_mode=ParseMode.HTML)
         ok, detail = await start_script(uid, slot)
         await q.message.reply_text("✅ Started" if ok else f"❌ Failed: {detail}", parse_mode=ParseMode.HTML)
