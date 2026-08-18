@@ -1,11 +1,2 @@
-# Exact version (Highly recommended for stability)
-requests==2.31.0
-
-# Minimum version required
-numpy>=1.26.4
-
-# Any version compatible with 2.2.x
-pandas~=2.2.1
-
-# Install the latest version available
-beautifulsoup4
+python-telegram-bot>=20.0
+Telethon>=1.30.3
