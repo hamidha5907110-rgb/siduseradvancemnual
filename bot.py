@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-SID HOSTER — Userbot script hoster with animated flow
+PURE HOSTER — Userbot script hoster with animated flow
 Combines Telethon login with user-provided scripts.
 
 Environment variables:
@@ -54,8 +54,8 @@ from telethon.sessions import StringSession
 #  CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_USERBOTS = max(1, int(os.getenv("MAX_USERBOTS", "50") or 50))
 MAX_SCRIPTS_PER_USER = max(1, int(os.getenv("MAX_SCRIPTS_PER_USER", "3") or 3))
@@ -333,7 +333,7 @@ def find_entrypoint(root: Path) -> Optional[Path]:
     return py_files[0] if py_files else None
 
 # ─────────────────────────────────────────────────────────────────────────
-#  SUBPROCESS RUNNER (24/7 ASYNC WATCHDOG ENABLED)
+#  SUBPROCESS RUNNER (24/7 ASYNC WATCHDOG & AUTO-SESSION INJECTION)
 # ─────────────────────────────────────────────────────────────────────────
 
 _procs: Dict[Tuple[int, int], subprocess.Popen] = {}
@@ -365,18 +365,58 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
     venv_dir = root / ".venv"
     python_exe = venv_dir / "bin" / "python" if os.name != "nt" else venv_dir / "Scripts" / "python.exe"
     
-    # Fully Async Virtual Environment & Pip setup to prevent bot freezing
-    if not venv_dir.exists() and (root / "requirements.txt").exists():
+    # 1. Virtual Environment & Automatic Package Installation
+    if (root / "requirements.txt").exists():
         try:
-            p1 = await asyncio.create_subprocess_exec(sys.executable, "-m", "venv", str(venv_dir))
-            await p1.wait()
+            if not venv_dir.exists():
+                p1 = await asyncio.create_subprocess_exec(sys.executable, "-m", "venv", str(venv_dir))
+                await p1.wait()
             
             p2 = await asyncio.create_subprocess_exec(
-                str(python_exe), "-m", "pip", "install", "-r", str(root / "requirements.txt")
+                str(python_exe if python_exe.exists() else sys.executable),
+                "-m", "pip", "install", "-r", str(root / "requirements.txt")
             )
             await asyncio.wait_for(p2.wait(), timeout=PIP_TIMEOUT)
         except Exception as e:
             return False, f"Dependency install failed: {e}"
+
+    # 2. Sitecustomize hook to automatically inject StringSession into Telethon & Pyrogram
+    sitecustomize_code = """
+import os
+import sys
+
+session_str = os.environ.get('SESSION_STRING')
+if session_str:
+    try:
+        import telethon
+        from telethon.sessions import StringSession
+        _orig_init = telethon.TelegramClient.__init__
+        def _patched_init(self, session, *args, **kwargs):
+            if not isinstance(session, StringSession):
+                if isinstance(session, str) and len(session) > 100:
+                    session = StringSession(session)
+                else:
+                    session = StringSession(session_str)
+            _orig_init(self, session, *args, **kwargs)
+        telethon.TelegramClient.__init__ = _patched_init
+    except Exception:
+        pass
+
+    try:
+        import pyrogram
+        _orig_pyro_init = pyrogram.Client.__init__
+        def _patched_pyro_init(self, name, *args, **kwargs):
+            if 'session_string' not in kwargs and len(name) < 100:
+                kwargs['session_string'] = session_str
+            _orig_pyro_init(self, name, *args, **kwargs)
+        pyrogram.Client.__init__ = _patched_pyro_init
+    except Exception:
+        pass
+"""
+    try:
+        (root / "sitecustomize.py").write_text(sitecustomize_code.strip(), encoding="utf-8")
+    except Exception:
+        pass
 
     env = os.environ.copy()
     env.update({
@@ -386,6 +426,7 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
         "PHONE_NUMBER": phone,
         "PYTHONUNBUFFERED": "1",
         "PYTHONIOENCODING": "utf-8",
+        "PYTHONPATH": str(root) + os.pathsep + env.get("PYTHONPATH", ""),
     })
     
     exe = str(python_exe) if python_exe.exists() else sys.executable
@@ -505,26 +546,12 @@ async def animate_otp_verify(msg):
         except:
             break
 
-async def simulate_button_animation(query, original_keyboard=None, text="⏳ Processing"):
-    """
-    Temporarily replace the button with a loading state, then restore the original after a short delay.
-    If original_keyboard is None, it will try to read the current reply_markup and restore it.
-    """
+async def simulate_button_animation(query, original_keyboard, text="⏳ Processing"):
     try:
-        # Store the original keyboard if not provided
-        if original_keyboard is None:
-            original_keyboard = query.message.reply_markup
-        
-        # Create a temporary loading keyboard
         loading_kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"{text}...", callback_data="none")]])
         await query.message.edit_reply_markup(reply_markup=loading_kb)
-        await asyncio.sleep(0.5)  # brief loading effect
-        
-        # Restore original keyboard if it exists
-        if original_keyboard:
-            await query.message.edit_reply_markup(reply_markup=original_keyboard)
+        await asyncio.sleep(0.4)
     except:
-        # If anything fails, just ignore and continue
         pass
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -577,7 +604,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     running = [a for a in hosted if is_running(uid, a["slot"])]
 
     text = (
-        f"{TOP}\n║  🚀  {bold('SID HOSTER')}  🚀  ║\n{BOTTOM}\n\n"
+        f"{TOP}\n║  🚀  {bold('PURE HOSTER CLOUD')}  🚀  ║\n{BOTTOM}\n\n"
         f"👋 Welcome, {esc(update.effective_user.first_name or 'User')}!\n"
         f"{DIV}\n"
         f"📦 Hosted Scripts: {len(hosted)}/{MAX_SCRIPTS_PER_USER}\n"
@@ -706,13 +733,12 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Scan failed: {esc(result.get('reason', 'Unknown'))}")
         return ConversationHandler.END
 
-    # ────────── NEW AUTO-DEPENDENCY LOGIC ──────────
+    # Auto-generate requirements.txt if not present
     req_path = root / "requirements.txt"
     if not req_path.exists() and result.get("imports"):
         try:
             std_libs = set(sys.stdlib_module_names)
         except AttributeError:
-            # Fallback for older Python versions
             std_libs = {
                 'os', 'sys', 'time', 'json', 're', 'asyncio', 'logging', 'hashlib', 'threading', 
                 'math', 'random', 'datetime', 'collections', 'pathlib', 'subprocess', 'shutil', 
@@ -723,9 +749,8 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         third_party = []
         for imp in result["imports"]:
-            imp_name = imp.split(".")[0] # Just the base module
+            imp_name = imp.split(".")[0]
             if imp_name not in std_libs and not imp_name.startswith("_") and imp_name != entry.stem:
-                # Map common aliases to their official PyPI package names
                 if imp_name == "bs4":
                     third_party.append("beautifulsoup4")
                 elif imp_name == "telethon":
@@ -743,13 +768,10 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 else:
                     third_party.append(imp_name)
                     
-        # Remove duplicates
         third_party = list(set(third_party))
-        
         if third_party:
             with open(req_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(third_party))
-    # ───────────────────────────────────────────────
 
     context.user_data["pending_slot"] = slot
     context.user_data["pending_entry"] = str(entry.relative_to(root))
@@ -914,13 +936,6 @@ async def _deploy_script(update, context, uid, slot, session_string, phone):
             f"{TOP}\n║  🎉  {bold('Deployed & Online 24/7')}  🎉  ║\n{BOTTOM}\n\n"
             f"✅ Your script <code>{esc(account_data['name'])}</code> is now active.\n"
             f"📱 Connected to: <code>{esc(phone)}</code>\n\n"
-            f"⚠️ {bold('IMPORTANT - CONNECTING IN YOUR SCRIPT')}\n"
-            f"To make sure your code uses this logged-in account, use this exact setup inside your code:\n\n"
-            f"<code>import os</code>\n"
-            f"<code>from telethon import TelegramClient</code>\n"
-            f"<code>from telethon.sessions import StringSession</code>\n\n"
-            f"<code>session_str = os.environ.get('SESSION_STRING')</code>\n"
-            f"<code>client = TelegramClient(StringSession(session_str), API_ID, API_HASH)</code>\n\n"
             f"Use /myaccounts to View Logs, Stop, or Restart."
         )
         await msg.edit_text(success_text, parse_mode=ParseMode.HTML)
@@ -955,7 +970,6 @@ async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Build the dynamic control panel grid
     for acct in hosted:
         slot = acct["slot"]
         phone = _phone_label(acct)
@@ -979,7 +993,6 @@ async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(kb))
         
-    # Main menu return button
     await update.message.reply_text("🔹 /start to return to Main Menu")
 
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1021,49 +1034,45 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.delete()
         return
 
-    # Store original keyboard for restoration after animation
-    original_kb = query.message.reply_markup
-
     if data == "host":
-        await simulate_button_animation(query, original_kb, "🚀 Preparing")
+        await simulate_button_animation(query, query.message.reply_markup, "🚀 Preparing")
         await query.message.delete()
         await query.message.reply_text("📤 Use /host to upload and deploy your script.")
         return
 
     if data == "myaccounts":
-        await simulate_button_animation(query, original_kb, "🎛 Loading")
+        await simulate_button_animation(query, query.message.reply_markup, "🎛 Loading")
         await query.message.delete()
         await cmd_myaccounts(update, context)
         return
 
     if data == "status":
-        await simulate_button_animation(query, original_kb, "📊 Fetching")
+        await simulate_button_animation(query, query.message.reply_markup, "📊 Fetching")
         await query.message.delete()
         await cmd_status(update, context)
         return
 
     if data == "help":
-        await simulate_button_animation(query, original_kb, "❓ Loading")
+        await simulate_button_animation(query, query.message.reply_markup, "❓ Loading")
         await query.message.delete()
         await cmd_help(update, context)
         return
 
     if data == "support":
-        await simulate_button_animation(query, original_kb, "📞 Loading")
+        await simulate_button_animation(query, query.message.reply_markup, "📞 Loading")
         await query.message.delete()
         await cmd_support(update, context)
         return
 
-    # Userbot Action: RESTART
     if data.startswith("restart_"):
         slot = int(data.split("_")[1])
         acct = get_account(uid, slot)
         if not acct:
             return await query.message.reply_text("❌ Script not found.")
         
-        await simulate_button_animation(query, original_kb, "🔄 Restarting")
+        await simulate_button_animation(query, query.message.reply_markup, "🔄 Restarting")
         acct["is_stopped"] = False
-        add_account(uid, acct) # Save state
+        add_account(uid, acct)
         
         root = script_root(uid, slot)
         entry = root / acct["entrypoint"]
@@ -1075,7 +1084,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text(f"❌ Restart failed: {msg}")
         return
 
-    # Userbot Action: TOGGLE START/STOP
     if data.startswith("toggle_"):
         slot = int(data.split("_")[1])
         acct = get_account(uid, slot)
@@ -1084,15 +1092,13 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         is_alive = is_running(uid, slot)
         if is_alive:
-            # STOP ACTION
-            await simulate_button_animation(query, original_kb, "⏹ Stopping")
+            await simulate_button_animation(query, query.message.reply_markup, "⏹ Stopping")
             stop_script(uid, slot)
             acct["is_stopped"] = True
             add_account(uid, acct)
             await query.message.reply_text(f"⏸ Userbot #{slot+1} stopped. Auto-restart disabled.")
         else:
-            # START ACTION
-            await simulate_button_animation(query, original_kb, "▶️ Starting")
+            await simulate_button_animation(query, query.message.reply_markup, "▶️ Starting")
             acct["is_stopped"] = False
             add_account(uid, acct)
             root = script_root(uid, slot)
@@ -1104,16 +1110,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await query.message.reply_text(f"❌ Start failed: {msg}")
         return
 
-    # Userbot Action: VIEW LOGS
     if data.startswith("logs_"):
         slot = int(data.split("_")[1])
         log_path = script_root(uid, slot) / "runtime.log"
         
-        await simulate_button_animation(query, original_kb, "📄 Fetching")
+        await simulate_button_animation(query, query.message.reply_markup, "📄 Fetching")
         
         if log_path.exists():
             with open(log_path, "r", encoding="utf-8") as f:
-                lines = f.readlines()[-30:] # Fetch last 30 lines
+                lines = f.readlines()[-30:]
             log_text = "".join(lines).strip()
             if not log_text:
                 log_text = "Logs are currently empty."
@@ -1124,10 +1129,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📄 {bold(f'Terminal Logs (Slot #{slot+1})')}\n<pre>{esc(log_text)}</pre>", 
             parse_mode=ParseMode.HTML
         )
-        # Restore button after fetching
         return
 
-    # Userbot Action: LOGOUT/DELETE
     if data.startswith("logout_"):
         slot = int(data.split("_")[1])
         acct = get_account(uid, slot)
@@ -1419,7 +1422,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_repeating(auto_health_check, interval=60, first=30)
 
-    logging.info("🚀 SID HOSTER started with animations")
+    logging.info("🚀 Pure Hoster Cloud Started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
