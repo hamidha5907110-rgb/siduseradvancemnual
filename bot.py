@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 PURE HOSTER — Userbot script hoster with animated flow
-Combines Telethon login with user‑provided scripts.
+Combines Telethon login with user-provided scripts.
 
 Environment variables:
   BOT_TOKEN          required
@@ -72,19 +72,17 @@ if not BOT_TOKEN or not OWNER_ID:
     raise ValueError("BOT_TOKEN and OWNER_ID must be set in environment.")
 
 # ─────────────────────────────────────────────────────────────────────────
-#  DATABASE (JSON, thread‑safe)
+#  DATABASE (JSON, thread-safe)
 # ─────────────────────────────────────────────────────────────────────────
 
 DB_DIR = Path(os.getcwd()) / "data"
 DB_DIR.mkdir(parents=True, exist_ok=True)
 _db_lock = threading.Lock()
 
-
 def _db_path(*parts):
     p = DB_DIR.joinpath(*parts)
     p.parent.mkdir(parents=True, exist_ok=True)
     return p
-
 
 def _read_json(path, default):
     try:
@@ -93,7 +91,6 @@ def _read_json(path, default):
     except:
         return default
 
-
 def _write_json(path, data):
     with _db_lock:
         tmp = path.with_suffix(path.suffix + ".tmp")
@@ -101,10 +98,8 @@ def _write_json(path, data):
             json.dump(data, f, ensure_ascii=False, indent=2)
         tmp.replace(path)
 
-
 def user_exists(uid):
     return _db_path("users", str(uid), "meta.json").exists()
-
 
 def save_user_meta(uid, data):
     path = _db_path("users", str(uid), "meta.json")
@@ -112,25 +107,20 @@ def save_user_meta(uid, data):
     existing.update(data)
     _write_json(path, existing)
 
-
 def get_all_users():
     users_dir = DB_DIR / "users"
     if not users_dir.exists():
         return []
     return [d.name for d in users_dir.iterdir() if d.is_dir() and d.name.isdigit()]
 
-
 def user_count():
     return len(get_all_users())
-
 
 def _accts_path(uid):
     return _db_path("users", str(uid), "accounts.json")
 
-
 def get_accounts(uid):
     return _read_json(_accts_path(uid), [])
-
 
 def get_account(uid, slot):
     for a in get_accounts(uid):
@@ -138,18 +128,15 @@ def get_account(uid, slot):
             return a
     return None
 
-
 def add_account(uid, acct):
     accounts = get_accounts(uid)
     accounts = [a for a in accounts if a.get("slot") != acct.get("slot")]
     accounts.append(acct)
     _write_json(_accts_path(uid), accounts)
 
-
 def remove_account(uid, slot):
     accounts = [a for a in get_accounts(uid) if a.get("slot") != slot]
     _write_json(_accts_path(uid), accounts)
-
 
 def hosted_count():
     total = 0
@@ -159,14 +146,11 @@ def hosted_count():
                 total += 1
     return total
 
-
 def _sudo_path():
     return _db_path("sudo.json")
 
-
 def get_sudo_users():
     return _read_json(_sudo_path(), [])
-
 
 def add_sudo(uid):
     s = get_sudo_users()
@@ -174,23 +158,18 @@ def add_sudo(uid):
         s.append(uid)
         _write_json(_sudo_path(), s)
 
-
 def remove_sudo(uid):
     s = [x for x in get_sudo_users() if x != uid]
     _write_json(_sudo_path(), s)
 
-
 def is_sudo(uid):
     return uid == OWNER_ID or uid in get_sudo_users()
-
 
 def _blocked_path():
     return _db_path("blocked.json")
 
-
 def get_blocked():
     return _read_json(_blocked_path(), [])
-
 
 def block_user(uid):
     b = get_blocked()
@@ -198,15 +177,12 @@ def block_user(uid):
         b.append(uid)
         _write_json(_blocked_path(), b)
 
-
 def unblock_user(uid):
     b = [x for x in get_blocked() if x != uid]
     _write_json(_blocked_path(), b)
 
-
 def is_blocked(uid):
     return uid in get_blocked()
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  SCRIPT SCANNER
@@ -220,7 +196,6 @@ PHONE_RE = re.compile(r"(?<!\d)(\+?[1-9]\d{7,14})(?!\d)")
 DANGEROUS_PATTERNS = [
     (re.compile(r"os\.environ\.(get|__getitem__)\(\s*[\"'](BOT_TOKEN|OWNER_ID)[\"']", re.I), "Attempts to read hoster secrets"),
 ]
-
 
 def _literal_value(node):
     if isinstance(node, ast.Constant):
@@ -237,7 +212,6 @@ def _literal_value(node):
         except Exception:
             return None
     return None
-
 
 def detect_api(text: str, tree: Optional[ast.AST] = None) -> Tuple[Optional[int], Optional[str]]:
     aid = ahash = None
@@ -280,7 +254,6 @@ def detect_api(text: str, tree: Optional[ast.AST] = None) -> Tuple[Optional[int]
             ahash = m.group(1)
     return aid, ahash
 
-
 def detect_phone(text: str) -> Optional[str]:
     for m in PHONE_RE.finditer(text):
         candidate = m.group(1)
@@ -288,7 +261,6 @@ def detect_phone(text: str) -> Optional[str]:
         if 8 <= len(digits) <= 15:
             return candidate
     return None
-
 
 def scan_script(path: Path) -> dict:
     raw = path.read_bytes()
@@ -331,7 +303,6 @@ def scan_script(path: Path) -> dict:
         "blocked": blocked,
     }
 
-
 def safe_extract_zip(zip_path: Path, target: Path) -> Tuple[bool, str]:
     try:
         with zipfile.ZipFile(zip_path) as zf:
@@ -355,7 +326,6 @@ def safe_extract_zip(zip_path: Path, target: Path) -> Tuple[bool, str]:
     except Exception as exc:
         return False, f"Extraction error: {exc}"
 
-
 def find_entrypoint(root: Path) -> Optional[Path]:
     main = root / "main.py"
     if main.exists():
@@ -365,7 +335,6 @@ def find_entrypoint(root: Path) -> Optional[Path]:
         return py_files[0]
     return py_files[0] if py_files else None
 
-
 # ─────────────────────────────────────────────────────────────────────────
 #  SUBPROCESS RUNNER
 # ─────────────────────────────────────────────────────────────────────────
@@ -374,7 +343,6 @@ _procs: Dict[Tuple[int, int], subprocess.Popen] = {}
 _start_times: Dict[Tuple[int, int], float] = {}
 _script_files: Dict[Tuple[int, int], Path] = {}
 _log_files: Dict[Tuple[int, int], Path] = {}
-
 
 def stop_script(uid: int, slot: int):
     key = (uid, slot)
@@ -391,7 +359,6 @@ def stop_script(uid: int, slot: int):
                 proc.kill()
             except:
                 pass
-
 
 def start_script(uid: int, slot: int, script_path: Path, session_string: str, api_id: int, api_hash: str, phone: str = ""):
     key = (uid, slot)
@@ -439,7 +406,6 @@ def start_script(uid: int, slot: int, script_path: Path, session_string: str, ap
     _log_files[key] = log_path
     return True, "Running"
 
-
 def is_running(uid: int, slot: int) -> bool:
     key = (uid, slot)
     proc = _procs.get(key)
@@ -451,7 +417,6 @@ def is_running(uid: int, slot: int) -> bool:
         return False
     return True
 
-
 def get_uptime(uid: int, slot: int) -> str:
     key = (uid, slot)
     t = _start_times.get(key)
@@ -462,7 +427,6 @@ def get_uptime(uid: int, slot: int) -> str:
     m, s = divmod(r, 60)
     return f"{h}h {m}m {s}s"
 
-
 def running_count():
     dead = [k for k, p in list(_procs.items()) if p.poll() is not None]
     for k in dead:
@@ -472,12 +436,10 @@ def running_count():
         _log_files.pop(k, None)
     return len(_procs)
 
-
 def stop_all_for_user(uid):
     for k in list(_procs.keys()):
         if k[0] == uid:
             stop_script(k[0], k[1])
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  FONT & STYLE HELPERS
@@ -486,30 +448,24 @@ def stop_all_for_user(uid):
 def bold(t: str) -> str:
     return f"<b>{t}</b>"
 
-
 def mono(t: str) -> str:
     return f"<code>{t}</code>"
-
 
 def italic(t: str) -> str:
     return f"<i>{t}</i>"
 
-
 def esc(t: str) -> str:
     return html.escape(str(t), quote=False)
-
 
 DIV = "━━━━━━━━━━━━━━━━━━━━━━━━━━"
 TOP = "╔══════════════════════════╗"
 BOTTOM = "╚══════════════════════════╝"
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  ANIMATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────
 
 async def animate_scanning(msg, steps=6, delay=0.15):
-    """Animate a scanning progress bar."""
     frames = [
         "🔎 Scanning `▱▱▱▱▱`",
         "🔎 Scanning `▰▱▱▱▱`",
@@ -525,7 +481,6 @@ async def animate_scanning(msg, steps=6, delay=0.15):
         except:
             break
 
-
 async def animate_connecting(msg):
     frames = [
         "📡 Connecting `▱▱▱`",
@@ -539,7 +494,6 @@ async def animate_connecting(msg):
             await asyncio.sleep(0.15)
         except:
             break
-
 
 async def animate_deploy(msg):
     frames = [
@@ -555,7 +509,6 @@ async def animate_deploy(msg):
         except:
             break
 
-
 async def animate_otp_verify(msg):
     frames = ["🔐 Verifying OTP `·`", "🔐 Verifying OTP `··`", "🔐 Verifying OTP `···`"]
     for frame in frames:
@@ -565,6 +518,14 @@ async def animate_otp_verify(msg):
         except:
             break
 
+async def simulate_button_animation(query, original_keyboard, text="⏳ Processing"):
+    """Creates a fake animation on an inline keyboard button."""
+    try:
+        loading_kb = InlineKeyboardMarkup([[InlineKeyboardButton(f"{text}...", callback_data="none")]])
+        await query.message.edit_reply_markup(reply_markup=loading_kb)
+        await asyncio.sleep(0.4)
+    except:
+        pass
 
 # ─────────────────────────────────────────────────────────────────────────
 #  BOT HELPERS
@@ -572,25 +533,20 @@ async def animate_otp_verify(msg):
 
 START_TIME = time.time()
 
-
 def uptime_str():
     e = int(time.time() - START_TIME)
     h, r = divmod(e, 3600)
     m, s = divmod(r, 60)
     return f"{h}h {m}m {s}s"
 
-
 def is_owner(uid):
     return uid == OWNER_ID
-
 
 def is_premium(uid):
     return is_owner(uid) or is_sudo(uid)
 
-
 def script_root(uid: int, slot: int) -> Path:
     return DB_DIR / "scripts" / str(uid) / f"slot_{slot}"
-
 
 def get_script(uid, slot):
     for a in get_accounts(uid):
@@ -598,10 +554,8 @@ def get_script(uid, slot):
             return a
     return None
 
-
 def _phone_label(acct):
     return acct.get("phone", f"Script #{acct.get('slot', 0)+1}")
-
 
 def main_keyboard(uid):
     return InlineKeyboardMarkup([
@@ -611,7 +565,6 @@ def main_keyboard(uid):
         [InlineKeyboardButton("❓  Help", callback_data="help")],
         [InlineKeyboardButton("📞  Support", callback_data="support")],
     ])
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  COMMANDS
@@ -639,23 +592,21 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=main_keyboard(uid))
 
-
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(update.effective_user.id):
         return
     text = (
         f"❓ {bold('Help & Commands')}\n{DIV}\n\n"
-        f"🔹 /start       – Welcome screen\n"
-        f"🔹 /host        – Upload and deploy a script\n"
-        f"🔹 /myaccounts  – Manage your scripts\n"
-        f"🔹 /status      – Check running status\n"
-        f"🔹 /restart     – Restart a script\n"
-        f"🔹 /logout      – Remove a script\n"
-        f"🔹 /support     – Contact support\n\n"
+        f"🔹 /start      – Welcome screen\n"
+        f"🔹 /host       – Upload and deploy a script\n"
+        f"🔹 /myaccounts – Manage your scripts\n"
+        f"🔹 /status     – Check running status\n"
+        f"🔹 /restart    – Restart a script\n"
+        f"🔹 /logout     – Remove a script\n"
+        f"🔹 /support    – Contact support\n\n"
         f"{DIV}\n👑 Owner commands: /restartall, /stats, /block, etc."
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
-
 
 async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(update.effective_user.id):
@@ -667,14 +618,12 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🔧 Try: /myaccounts, /restart, /status, /logout → /host"
     )
 
-
 # ─────────────────────────────────────────────────────────────────────────
 #  HOST CONVERSATION (upload + Telethon login)
 # ─────────────────────────────────────────────────────────────────────────
 
 UPLOAD_WAIT_FILE, UPLOAD_WAIT_PHONE, UPLOAD_WAIT_OTP, UPLOAD_WAIT_2FA = range(4)
 pending_logins: Dict[int, dict] = {}
-
 
 async def host_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.callback_query:
@@ -703,12 +652,11 @@ async def host_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply(
         f"{TOP}\n║  🚀  {bold('Deploy Your Script')}  🚀  ║\n{BOTTOM}\n\n"
         f"📤 Send a <code>.py</code> file or a <code>.zip</code> containing your script.\n"
-        f"I will scan it for API keys and phone numbers.\n\n"
+        f"I will scan it for requirements and prepare the environment.\n\n"
         f"💡 {italic('Send /cancel to abort')}",
         parse_mode=ParseMode.HTML,
     )
     return UPLOAD_WAIT_FILE
-
 
 async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -802,30 +750,19 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📄 Name: <code>{esc(name)}</code>\n"
         f"📦 Size: {result['size']:,} bytes\n"
         f"🔐 SHA: <code>{result['sha256'][:16]}…</code>\n"
-        f"📱 Phone: {f'<code>{esc(phone)}</code>' if phone else 'Not detected'}\n"
         f"📦 Imports: {len(result['imports'])} detected\n"
     )
     if result.get("warnings"):
         summary += f"⚠️ Warnings: {', '.join(result['warnings'])}\n"
 
-    await msg.edit_text(summary, parse_mode=ParseMode.HTML)
-
-    if phone:
-        await msg.edit_text(
-            f"{summary}\n\n📱 Phone detected, proceeding to login...",
-            parse_mode=ParseMode.HTML,
-        )
-        return await _start_telethon_login(update, context, uid, slot, phone)
-    else:
-        await update.message.reply_text(
-            f"📱 {bold('Phone number required')}\n\n"
-            f"No phone number was detected in your script.\n"
-            f"Send the Telegram phone number with country code.\n"
-            f"Example: <code>+919876543210</code>",
-            parse_mode=ParseMode.HTML,
-        )
-        return UPLOAD_WAIT_PHONE
-
+    # Always enforce phone input flow based on user requirement
+    await msg.edit_text(
+        f"{summary}\n\n📱 {bold('Phone number required')}\n"
+        f"Please send the Telegram phone number for this userbot with the country code.\n"
+        f"Example: <code>+919876543210</code>",
+        parse_mode=ParseMode.HTML,
+    )
+    return UPLOAD_WAIT_PHONE
 
 async def host_got_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -836,7 +773,6 @@ async def host_got_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return UPLOAD_WAIT_PHONE
 
     return await _start_telethon_login(update, context, uid, context.user_data["pending_slot"], phone)
-
 
 async def _start_telethon_login(update, context, uid, slot, phone):
     msg = await update.message.reply_text(f"⏳ Sending OTP to {esc(phone)}...")
@@ -866,7 +802,6 @@ async def _start_telethon_login(update, context, uid, slot, phone):
         await msg.edit_text(f"❌ Error: {esc(str(e)[:120])}")
         return ConversationHandler.END
 
-
 async def host_got_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     code = update.message.text.strip().replace(" ", "")
@@ -895,7 +830,7 @@ async def host_got_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except SessionPasswordNeededError:
         await msg.edit_text(
             f"🔒 {bold('2FA Detected')}\n\n"
-            f"Enter your Two‑Step Verification password.",
+            f"Enter your Two-Step Verification password.",
             parse_mode=ParseMode.HTML,
         )
         return UPLOAD_WAIT_2FA
@@ -907,7 +842,6 @@ async def host_got_otp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"❌ Error: {esc(str(e)[:120])}")
         return ConversationHandler.END
-
 
 async def host_got_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -935,7 +869,6 @@ async def host_got_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Wrong 2FA: {esc(str(e)[:120])}")
         return UPLOAD_WAIT_2FA
 
-
 async def _deploy_script(update, context, uid, slot, session_string, phone):
     account_data = context.user_data.get("account_data")
     if not account_data:
@@ -949,7 +882,6 @@ async def _deploy_script(update, context, uid, slot, session_string, phone):
 
     add_account(uid, account_data)
 
-    # Launch the script with animation
     msg = await update.message.reply_text("🚀 Deploying `▱▱▱`", parse_mode=ParseMode.HTML)
     await animate_deploy(msg)
 
@@ -973,13 +905,11 @@ async def _deploy_script(update, context, uid, slot, session_string, phone):
 
     return ConversationHandler.END
 
-
 async def host_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     pending_logins.pop(uid, None)
     await update.message.reply_text("🚫 Cancelled.")
     return ConversationHandler.END
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  MYACCOUNTS, STATUS, RESTART, LOGOUT
@@ -1032,7 +962,6 @@ async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(update.effective_user.id):
         return
@@ -1060,7 +989,6 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         + "\n\n".join(lines),
         parse_mode=ParseMode.HTML,
     )
-
 
 async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(update.effective_user.id):
@@ -1091,24 +1019,22 @@ async def cmd_restart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-
 async def _do_restart(update, uid, slot, acct):
     msg = await update.message.reply_text(f"🔄 Restarting #{slot+1}...")
-    await animate_deploy(msg)  # reuse deploy animation
+    await animate_deploy(msg) 
     stop_script(uid, slot)
     root = script_root(uid, slot)
     entry = root / acct["entrypoint"]
     session = acct.get("session_string")
     phone = acct.get("phone", "")
     if not session:
-        await msg.edit_text("❌ No session stored. Re‑deploy with /host.")
+        await msg.edit_text("❌ No session stored. Re-deploy with /host.")
         return
     ok, detail = start_script(uid, slot, entry, session, TELEGRAM_API_ID, TELEGRAM_API_HASH, phone)
     if ok:
         await msg.edit_text(f"✅ #{slot+1} restarted.")
     else:
         await msg.edit_text(f"❌ Restart failed: {esc(detail)}")
-
 
 async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if is_blocked(update.effective_user.id):
@@ -1139,16 +1065,18 @@ async def cmd_logout(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
-
 async def _do_logout(update, uid, slot, acct):
     stop_script(uid, slot)
     remove_account(uid, slot)
     shutil.rmtree(script_root(uid, slot), ignore_errors=True)
-    await update.message.reply_text(f"🗑️ Script #{slot+1} removed.")
-
+    
+    if hasattr(update, 'message') and update.message:
+        await update.message.reply_text(f"🗑️ Script #{slot+1} removed.")
+    elif hasattr(update, 'callback_query') and update.callback_query:
+        await update.callback_query.message.edit_text(f"🗑️ Script #{slot+1} removed.")
 
 # ─────────────────────────────────────────────────────────────────────────
-#  CALLBACKS
+#  CALLBACKS (With button animation simulations)
 # ─────────────────────────────────────────────────────────────────────────
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1162,22 +1090,32 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data == "host":
+        await simulate_button_animation(query, query.message.reply_markup, "🚀 Loading")
+        await query.message.delete()
         await query.message.reply_text("📤 Use /host to upload and deploy.")
         return
 
     if data == "myaccounts":
+        await simulate_button_animation(query, query.message.reply_markup, "📋 Fetching")
+        await query.message.delete()
         await cmd_myaccounts(update, context)
         return
 
     if data == "status":
+        await simulate_button_animation(query, query.message.reply_markup, "📊 Checking")
+        await query.message.delete()
         await cmd_status(update, context)
         return
 
     if data == "help":
+        await simulate_button_animation(query, query.message.reply_markup, "❓ Loading")
+        await query.message.delete()
         await cmd_help(update, context)
         return
 
     if data == "support":
+        await simulate_button_animation(query, query.message.reply_markup, "📞 Loading")
+        await query.message.delete()
         await cmd_support(update, context)
         return
 
@@ -1202,14 +1140,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not acct:
             await query.message.reply_text("❌ Script not found.")
             return
-        # start a stopped script
+        
+        await query.message.delete()
         msg = await query.message.reply_text(f"▶️ Starting #{slot+1}...")
         root = script_root(uid, slot)
         entry = root / acct["entrypoint"]
         session = acct.get("session_string")
         phone = acct.get("phone", "")
         if not session:
-            await msg.edit_text("❌ No session. Re‑deploy.")
+            await msg.edit_text("❌ No session. Re-deploy.")
             return
         ok, detail = start_script(uid, slot, entry, session, TELEGRAM_API_ID, TELEGRAM_API_HASH, phone)
         if ok:
@@ -1232,8 +1171,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("✅ Confirm Logout", callback_data=f"confirm_logout_{slot}")],
             [InlineKeyboardButton("❌ Cancel", callback_data="cancel_action")],
         ])
-        await query.message.reply_text(
-            f"⚠️ Logout <code>{esc(phone)}</code>?",
+        await query.message.edit_text(
+            f"⚠️ Are you sure you want to logout <code>{esc(phone)}</code>?",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
@@ -1246,11 +1185,10 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         acct = get_account(uid, slot)
         if acct:
-            await _do_logout(query, uid, slot, acct)
+            await _do_logout(update, uid, slot, acct)
         else:
             await query.message.reply_text("❌ Already removed.")
         return
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  ADMIN COMMANDS
@@ -1261,7 +1199,6 @@ async def owner_only(update: Update) -> bool:
         await update.message.reply_text("🔒 Owner only.")
         return False
     return True
-
 
 async def cmd_restartall(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
@@ -1286,7 +1223,6 @@ async def cmd_restartall(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 count += 1
     await msg.edit_text(f"✅ Restarted {count} scripts.")
 
-
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
@@ -1306,7 +1242,6 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🕒 Uptime: {uptime_str()}"
     )
 
-
 async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
@@ -1324,7 +1259,6 @@ async def cmd_block(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("❌ Invalid ID.")
 
-
 async def cmd_unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
@@ -1338,7 +1272,6 @@ async def cmd_unblock(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except:
         await update.message.reply_text("❌ Invalid ID.")
 
-
 async def cmd_blockeduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
@@ -1348,7 +1281,6 @@ async def cmd_blockeduser(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     lines = "\n".join(f"🚫 {u}" for u in blocked)
     await update.message.reply_text(f"Blocked:\n{lines}")
-
 
 async def cmd_sudolist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
@@ -1375,7 +1307,6 @@ async def cmd_sudolist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines = "\n".join(f"👑 {u}" for u in sudo)
     await update.message.reply_text(f"Sudo users:\n{lines}")
 
-
 async def cmd_setdp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
@@ -1392,7 +1323,6 @@ async def cmd_setdp(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await update.message.reply_text(f"❌ Failed: {e}")
 
-
 async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
         return
@@ -1402,7 +1332,6 @@ async def cmd_refresh(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Hosted: {hosted_count()}\n"
         f"Uptime: {uptime_str()}"
     )
-
 
 async def cmd_secretfunction(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await owner_only(update):
@@ -1419,7 +1348,6 @@ async def cmd_secretfunction(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"/setdp\n"
         f"/blockeduser"
     )
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  AUTO HEALTH CHECK
@@ -1440,7 +1368,6 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
                 if not entry.exists():
                     continue
                 start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""))
-
 
 # ─────────────────────────────────────────────────────────────────────────
 #  MAIN
@@ -1480,8 +1407,7 @@ async def post_init(app: Application):
             ok, _ = start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""))
             if ok:
                 count += 1
-    logging.info(f"Auto‑started {count} scripts.")
-
+    logging.info(f"Auto-started {count} scripts.")
 
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
@@ -1534,7 +1460,6 @@ def main():
 
     logging.info("🤖 Pure Hoster Bot started with animations")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
