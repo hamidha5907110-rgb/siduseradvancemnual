@@ -61,8 +61,8 @@ from telegram.ext import (
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_RUNNING = max(1, int(os.getenv("MAX_RUNNING", "50") or 50))
 FREE_SCRIPT_LIMIT = max(1, int(os.getenv("FREE_SCRIPT_LIMIT", "3") or 3))
@@ -529,6 +529,9 @@ async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
             "HOSTER_USER_ID": str(uid),
             "HOSTER_SLOT": str(slot),
         }
+        if item.get("phone"):
+            env["HOSTER_PHONE"] = str(item["phone"])
+            env["PHONE_NUMBER"] = str(item["phone"])
         (root / "tmp").mkdir(parents=True, exist_ok=True)
         if api.get("api_id") and api.get("api_hash"):
             env.update({
@@ -631,6 +634,25 @@ API_ID_NAMES = {"API_ID", "api_id", "TG_API_ID", "TELEGRAM_API_ID", "CLIENT_API_
 API_HASH_NAMES = {"API_HASH", "api_hash", "TG_API_HASH", "TELEGRAM_API_HASH", "CLIENT_API_HASH"}
 API_ID_RE = re.compile(r"(?im)\b(?:API_ID|api_id|TG_API_ID|TELEGRAM_API_ID)\b\s*(?:[:=])\s*(?:int\(\s*)?[\"']?(\d{5,12})")
 API_HASH_RE = re.compile(r"(?im)\b(?:API_HASH|api_hash|TG_API_HASH|TELEGRAM_API_HASH)\b\s*(?:[:=])\s*(?:str\(\s*)?[\"']([A-Za-z0-9]{16,128})[\"']")
+PHONE_RE = re.compile(r"(?<!\d)(\+?[1-9]\d{7,14})(?!\d)")
+AUTH_MARKERS = (
+    "send_code_request", "sign_in", "SessionPasswordNeededError",
+    "phone_code_hash", "Please enter the code", "enter the code",
+    "2fa", "two-step", "two step", "password", "getpass("
+)
+
+def detect_phone_and_auth(text: str) -> tuple[Optional[str], bool, bool]:
+    phone = None
+    for m in PHONE_RE.finditer(text):
+        candidate = m.group(1)
+        digits = candidate.replace("+", "")
+        if 8 <= len(digits) <= 15:
+            phone = candidate
+            break
+    low = text.lower()
+    interactive = any(marker.lower() in low for marker in AUTH_MARKERS) or "input(" in low
+    twofa = any(marker in low for marker in ("sessionpasswordneedederror", "2fa", "two-step", "two step")) or "enter your 2fa" in low
+    return phone, interactive, twofa
 
 DANGEROUS_PATTERNS = [
     (re.compile(r"os\.environ\.(get|__getitem__)\(\s*[\"'](BOT_TOKEN|OWNER_ID)[\"']", re.I), "Attempts to read hoster secrets"),
@@ -724,6 +746,7 @@ def scan_script(path: Path) -> dict:
             warnings.append(label)
             blocked.append(label)
     aid, ahash = detect_api(text, tree)
+    phone, interactive, twofa = detect_phone_and_auth(text)
     return {
         "ok": not blocked,
         "size": len(raw),
@@ -731,6 +754,9 @@ def scan_script(path: Path) -> dict:
         "imports": sorted(imports),
         "api_id": aid,
         "api_hash": ahash,
+        "phone": phone,
+        "interactive_auth": interactive,
+        "twofa": twofa,
         "warnings": warnings,
         "blocked": blocked,
     }
@@ -857,6 +883,7 @@ def dashboard_text(uid: int) -> str:
         f"🟢 <b>RUNNING</b>   {running}\n"
         f"🔐 <b>API PROFILE</b> {api_state}\n"
         f"🎁 <b>REFERRALS</b> {refs}/{REFERRAL_TARGET}\n"
+        f"🛡️ <b>AUTH</b>      Manual handoff supported\n"
         f"{DIV}\n"
         f"<i>Manual hosting • Your code stays yours • No source rewriting</i>"
     )
@@ -964,7 +991,9 @@ async def _finish_ready_script(update, context, uid: int, slot: int, result: dic
         f"📦 Size: <b>{result['size']:,}</b> bytes\n"
         f"🔐 SHA256: <code>{result['sha256'][:20]}…</code>\n"
         f"🧩 Entrypoint: <code>{esc(item.get('entrypoint','main.py'))}</code>\n"
-        f"📦 Dependencies: {'✅ requirements.txt found' if item.get('has_requirements') else 'ℹ️ none supplied'}\n\n"
+        f"📦 Dependencies: {'✅ requirements.txt found' if item.get('has_requirements') else 'ℹ️ none supplied'}\n"
+        f"📱 Phone: <code>{esc(item.get('phone') or 'Not detected')}</code>\n"
+        f"🔐 Auth: {'Interactive Telegram login detected' if item.get('interactive_auth') else 'Script-managed / already authorized'}\n\n"
         f"{api_state}{warn_text}\n\n"
         f"Press <b>Host Now</b> to run the uploaded script unchanged.",
         parse_mode=ParseMode.HTML,
@@ -1054,9 +1083,17 @@ async def receive_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "warnings": result.get("warnings", []),
         "imports": result.get("imports", []),
         "has_requirements": requirements.exists(),
+        "phone": result.get("phone"),
+        "interactive_auth": bool(result.get("interactive_auth")),
+        "twofa": bool(result.get("twofa")),
         "crash_count": 0,
     }
     replace_script(uid, entry)
+
+    if result.get("phone"):
+        api_state += f"\n📱 Phone detected: <code>{esc(result['phone'])}</code>."
+    else:
+        api_state += "\n📱 Phone not detected; the hoster will ask for it before interactive login."
 
     if not ((detected_id and detected_hash) or (api.get("api_id") and api.get("api_hash"))):
         context.user_data["pending_slot"] = slot
@@ -1122,6 +1159,150 @@ async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
     return ConversationHandler.END
 
+
+AUTH_PHONE_STATE = 10
+AUTH_OTP_STATE = 11
+AUTH_2FA_STATE = 12
+
+async def auth_host_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    q = update.callback_query
+    await q.answer("🔐 Preparing secure login…")
+    uid = update.effective_user.id
+    try:
+        slot = int(q.data.split(":", 1)[1])
+    except Exception:
+        await q.message.reply_text("❌ Invalid script.")
+        return ConversationHandler.END
+    item = find_script(uid, slot)
+    if not item:
+        await q.message.reply_text("❌ Script not found.")
+        return ConversationHandler.END
+    if not item.get("interactive_auth"):
+        msg = await q.message.reply_text("🚀 <b>Launching your script…</b>", parse_mode=ParseMode.HTML)
+        await animate(msg, ["🚀 Launching `▱▱▱`", "📦 Preparing `▰▱▱`", "⚡ Starting `▰▰▰`"], 0.07)
+        ok, detail = await start_script(uid, slot)
+        await msg.edit_text(
+            f"✅ <b>Hosted successfully</b>\n\nScript <b>#{slot+1}</b> is running." if ok else f"❌ <b>Host failed</b>\n\n{esc(detail)}",
+            parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+
+    context.user_data["auth_slot"] = slot
+    context.user_data["auth_phone"] = item.get("phone") or ""
+    if item.get("phone"):
+        await q.message.reply_text(
+            f"🔐 <b>LOGIN HANDOFF</b>\n\n📱 Detected phone: <code>{esc(item['phone'])}</code>\n\n"
+            f"The uploaded script will handle Telegram authentication.\n"
+            f"We will forward the temporary inputs to that running process only.\n\n"
+            f"Send <b>YES</b> to start, or /cancel to abort.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AUTH_PHONE_STATE
+    await q.message.reply_text(
+        "📱 <b>Phone number required</b>\n\n"
+        "No phone number was detected in the uploaded script.\n"
+        "Send the Telegram phone number with country code. It will only be used for this login handoff.",
+        parse_mode=ParseMode.HTML,
+    )
+    return AUTH_PHONE_STATE
+
+async def auth_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+    slot = context.user_data.get("auth_slot")
+    uid = update.effective_user.id
+    if text.upper() == "YES" and context.user_data.get("auth_phone"):
+        phone = context.user_data["auth_phone"]
+    else:
+        phone = text.replace(" ", "").replace("-", "")
+        if not re.fullmatch(r"\+?[1-9]\d{7,14}", phone):
+            await update.message.reply_text("❌ Invalid phone number. Example: <code>+919876543210</code>", parse_mode=ParseMode.HTML)
+            return AUTH_PHONE_STATE
+        context.user_data["auth_phone"] = phone
+        item = find_script(uid, int(slot))
+        if item:
+            replace_script(uid, {**item, "phone": phone})
+
+    item = find_script(uid, int(slot))
+    if not item:
+        await update.message.reply_text("❌ Script no longer exists.")
+        return ConversationHandler.END
+    msg = await update.message.reply_text("🚀 <b>Launching authentication…</b>", parse_mode=ParseMode.HTML)
+    await animate(msg, ["📡 Connecting `▱▱▱`", "📨 Preparing login `▰▱▱`", "🔐 Waiting for code `▰▰▰`"], 0.07)
+    ok, detail = await start_script(uid, int(slot))
+    if not ok:
+        await msg.edit_text(f"❌ <b>Launch failed</b>\n\n{esc(detail)}", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    # Give the script a moment to reach its phone prompt, then forward the phone.
+    await asyncio.sleep(0.8)
+    pipe = INPUT_PIPES.get((uid, int(slot)))
+    if pipe and item.get("phone") is None:
+        try:
+            pipe.write((phone + "\n").encode("utf-8")); await pipe.drain()
+        except Exception:
+            pass
+    context.user_data["auth_started"] = True
+    await msg.edit_text(
+        f"📨 <b>OTP STAGE</b>\n\nScript <b>#{int(slot)+1}</b> is running.\n"
+        f"Enter the Telegram login code you received.\n\n"
+        f"⚠️ The hoster does not save the code. It is forwarded to your running script only.",
+        parse_mode=ParseMode.HTML,
+    )
+    return AUTH_OTP_STATE
+
+async def auth_otp(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    slot = context.user_data.get("auth_slot")
+    code = update.message.text.strip()
+    if not re.fullmatch(r"[0-9\s-]{3,20}", code):
+        await update.message.reply_text("❌ Invalid login code. Enter the Telegram code only.")
+        return AUTH_OTP_STATE
+    pipe = INPUT_PIPES.get((uid, int(slot)))
+    proc = PROCS.get((uid, int(slot)))
+    if not pipe or not proc or proc.returncode is not None:
+        await update.message.reply_text("❌ The hosted script stopped. Check <code>/logs %s</code>." % (int(slot)+1), parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    try:
+        pipe.write((code.replace(" ", "") + "\n").encode("utf-8")); await pipe.drain()
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Could not forward the code: <code>{esc(str(exc)[:120])}</code>", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    item = find_script(uid, int(slot)) or {}
+    if item.get("twofa"):
+        await update.message.reply_text(
+            "🔒 <b>2FA STAGE</b>\n\nEnter your Telegram Two-Step Verification password.\n\n"
+            "⚠️ It is forwarded only to your running script and is not written to the hoster's database or runtime log.",
+            parse_mode=ParseMode.HTML,
+        )
+        return AUTH_2FA_STATE
+    await asyncio.sleep(1.0)
+    await update.message.reply_text(
+        f"✅ <b>Authentication handoff complete</b>\n\nScript <b>#{int(slot)+1}</b> remains under manual hosting.\n"
+        f"Use <code>/status</code> to verify it is running.",
+        parse_mode=ParseMode.HTML,
+    )
+    return ConversationHandler.END
+
+async def auth_2fa(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    uid = update.effective_user.id
+    slot = context.user_data.get("auth_slot")
+    password = update.message.text
+    pipe = INPUT_PIPES.get((uid, int(slot)))
+    proc = PROCS.get((uid, int(slot)))
+    if not pipe or not proc or proc.returncode is not None:
+        await update.message.reply_text("❌ The hosted script stopped. Check its logs.")
+        return ConversationHandler.END
+    try:
+        pipe.write((password + "\n").encode("utf-8")); await pipe.drain()
+    except Exception as exc:
+        await update.message.reply_text(f"❌ Could not forward 2FA: <code>{esc(str(exc)[:120])}</code>", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    await asyncio.sleep(1.0)
+    await update.message.reply_text(
+        f"✅ <b>Authentication handoff complete</b>\n\nScript <b>#{int(slot)+1}</b> is now under manual hosting.\n"
+        f"Use <code>/status</code> or <code>/logs {int(slot)+1}</code> for the result.",
+        parse_mode=ParseMode.HTML,
+    )
+    return ConversationHandler.END
 
 async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.effective_message.reply_text("🚫 Upload cancelled.")
@@ -1259,14 +1440,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.message.reply_text("🚪 <b>Select the hosted script to stop & remove:</b>", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "logout"))
         return
     if data.startswith("host:"):
-        slot = int(data.split(":", 1)[1])
-        msg = await q.message.reply_text("🚀 <b>Preparing host...</b>", parse_mode=ParseMode.HTML)
-        await animate(msg, ["🚀 Preparing `▱▱▱`", "📦 Launching `▰▱▱`", "⚡ Checking `▰▰▰`"])
-        ok, detail = await start_script(uid, slot)
-        if ok:
-            await msg.edit_text(f"✅ <b>Hosted successfully</b>\n\nScript <b>#{slot+1}</b> is running.\n\n⌨️ For scripts that request manual input, use <code>/sendinput {slot+1} YOUR_CODE</code>.", parse_mode=ParseMode.HTML)
-        else:
-            await msg.edit_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
+        # Let the dedicated authentication ConversationHandler own the flow.
         return
     if data.startswith("restart:"):
         slot = int(data.split(":", 1)[1])
@@ -1488,6 +1662,17 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("revoke_premium", admin_revoke))
     app.add_handler(CommandHandler("broadcast", broadcast))
     app.add_handler(CommandHandler("stats", admin_stats))
+    auth_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(auth_host_callback, pattern=r"^host:\d+$")],
+        states={
+            AUTH_PHONE_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, auth_phone)],
+            AUTH_OTP_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, auth_otp)],
+            AUTH_2FA_STATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, auth_2fa)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_upload)],
+        allow_reentry=True,
+    )
+    app.add_handler(auth_conv)
     app.add_handler(CallbackQueryHandler(callbacks))
     return app
 
