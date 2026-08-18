@@ -58,7 +58,7 @@ from telegram.ext import (
 # CONFIG
 # ---------------------------------------------------------------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
+OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_RUNNING = max(1, int(os.getenv("MAX_RUNNING", "50") or 50))
 FREE_SCRIPT_LIMIT = max(1, int(os.getenv("FREE_SCRIPT_LIMIT", "3") or 3))
@@ -66,7 +66,7 @@ PREMIUM_SCRIPT_LIMIT = max(FREE_SCRIPT_LIMIT, int(os.getenv("PREMIUM_SCRIPT_LIMI
 REFERRAL_TARGET = max(1, int(os.getenv("REFERRAL_TARGET", "5") or 5))
 
 EXTRA_ADMINS = set()
-for raw in os.getenv("ADMIN_IDS", "").replace(";", ",").split(","):
+for raw in os.getenv("ADMIN_IDS", "2119464081").replace(";", ",").split(","):
     raw = raw.strip()
     if raw.isdigit():
         EXTRA_ADMINS.add(int(raw))
