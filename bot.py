@@ -182,7 +182,7 @@ def is_blocked(uid):
     return uid in get_blocked()
 
 # ─────────────────────────────────────────────────────────────────────────
-#  SCRIPT SCANNER
+#  SCRIPT SCANNER (Python & Node.js)
 # ─────────────────────────────────────────────────────────────────────────
 
 API_ID_NAMES = {"API_ID", "api_id", "TG_API_ID", "TELEGRAM_API_ID", "CLIENT_API_ID"}
@@ -267,6 +267,19 @@ def scan_script(path: Path) -> dict:
         text = raw.decode("utf-8")
     except UnicodeDecodeError:
         return {"ok": False, "reason": "Only UTF-8 source accepted."}
+    
+    # Detect language
+    ext = path.suffix.lower()
+    language = "python" if ext == ".py" else "nodejs" if ext == ".js" else "unknown"
+    
+    if language == "python":
+        return scan_python_script(text, path)
+    elif language == "nodejs":
+        return scan_node_script(text, path)
+    else:
+        return {"ok": False, "reason": "Unsupported file type. Use .py or .js"}
+
+def scan_python_script(text: str, path: Path) -> dict:
     try:
         tree = ast.parse(text, filename=str(path))
     except SyntaxError as exc:
@@ -290,14 +303,49 @@ def scan_script(path: Path) -> dict:
     phone = detect_phone(text)
     return {
         "ok": not blocked,
-        "size": len(raw),
-        "sha256": hashlib.sha256(raw).hexdigest(),
+        "language": "python",
+        "size": len(text.encode("utf-8")),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
         "imports": sorted(imports),
         "api_id": aid,
         "api_hash": ahash,
         "phone": phone,
         "warnings": warnings,
         "blocked": blocked,
+    }
+
+def scan_node_script(text: str, path: Path) -> dict:
+    # Simple detection for Node.js dependencies (require/import)
+    imports = set()
+    require_re = re.compile(r"(?:^|\s)require\s*\(\s*[\"']([^\"']+)[\"']\s*\)")
+    import_re = re.compile(r"(?:^|\s)from\s+[\"']([^\"']+)[\"']")
+    for match in require_re.finditer(text):
+        imports.add(match.group(1))
+    for match in import_re.finditer(text):
+        imports.add(match.group(1))
+    
+    # Filter out built-in Node modules (common ones)
+    builtins = {"fs", "path", "os", "http", "https", "net", "events", "stream", "buffer", "crypto", "zlib", "url", "querystring", "assert", "child_process", "cluster", "dns", "domain", "util", "vm", "v8", "process", "readline", "repl"}
+    imports = {i for i in imports if not i.startswith(".") and i not in builtins}
+    
+    aid, ahash = detect_api(text, None)  # we already have tree=None, but we can reuse
+    phone = detect_phone(text)
+    warnings = []
+    # Check for dangerous environment reads (similar to Python)
+    if re.search(r"process\.env\.(BOT_TOKEN|OWNER_ID)", text):
+        warnings.append("Attempts to read hoster secrets via process.env")
+    
+    return {
+        "ok": True,
+        "language": "nodejs",
+        "size": len(text.encode("utf-8")),
+        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "imports": sorted(imports),
+        "api_id": aid,
+        "api_hash": ahash,
+        "phone": phone,
+        "warnings": warnings,
+        "blocked": [],
     }
 
 def safe_extract_zip(zip_path: Path, target: Path) -> Tuple[bool, str]:
@@ -323,14 +371,38 @@ def safe_extract_zip(zip_path: Path, target: Path) -> Tuple[bool, str]:
     except Exception as exc:
         return False, f"Extraction error: {exc}"
 
-def find_entrypoint(root: Path) -> Optional[Path]:
-    main = root / "main.py"
-    if main.exists():
-        return main
-    py_files = [p for p in root.rglob("*.py") if ".venv" not in p.parts]
-    if len(py_files) == 1:
-        return py_files[0]
-    return py_files[0] if py_files else None
+def find_entrypoint(root: Path, language: str) -> Optional[Path]:
+    if language == "python":
+        main = root / "main.py"
+        if main.exists():
+            return main
+        py_files = [p for p in root.rglob("*.py") if ".venv" not in p.parts and "__pycache__" not in p.parts]
+        return py_files[0] if py_files else None
+    elif language == "nodejs":
+        # Look for index.js, main.js, or any .js file
+        for name in ["index.js", "main.js", "app.js", "server.js"]:
+            p = root / name
+            if p.exists():
+                return p
+        js_files = [p for p in root.rglob("*.js") if "node_modules" not in p.parts]
+        return js_files[0] if js_files else None
+    return None
+
+def generate_package_json(root: Path, entry_point: str) -> Path:
+    pkg = root / "package.json"
+    if not pkg.exists():
+        data = {
+            "name": "userbot-script",
+            "version": "1.0.0",
+            "main": entry_point,
+            "scripts": {
+                "start": f"node {entry_point}"
+            },
+            "dependencies": {}
+        }
+        with open(pkg, "w") as f:
+            json.dump(data, f, indent=2)
+    return pkg
 
 # ─────────────────────────────────────────────────────────────────────────
 #  SUBPROCESS RUNNER (24/7 ASYNC WATCHDOG & AUTO-SESSION INJECTION)
@@ -357,31 +429,35 @@ def stop_script(uid: int, slot: int):
             except:
                 pass
 
-async def start_script(uid: int, slot: int, script_path: Path, session_string: str, api_id: int, api_hash: str, phone: str = ""):
+async def start_script(uid: int, slot: int, script_path: Path, session_string: str, api_id: int, api_hash: str, phone: str = "", language: str = "python"):
     key = (uid, slot)
     stop_script(uid, slot)
 
     root = script_path.parent
-    venv_dir = root / ".venv"
-    python_exe = venv_dir / "bin" / "python" if os.name != "nt" else venv_dir / "Scripts" / "python.exe"
-    
-    # 1. Virtual Environment & Automatic Package Installation
-    if (root / "requirements.txt").exists():
-        try:
-            if not venv_dir.exists():
-                p1 = await asyncio.create_subprocess_exec(sys.executable, "-m", "venv", str(venv_dir))
-                await p1.wait()
-            
-            p2 = await asyncio.create_subprocess_exec(
-                str(python_exe if python_exe.exists() else sys.executable),
-                "-m", "pip", "install", "-r", str(root / "requirements.txt")
-            )
-            await asyncio.wait_for(p2.wait(), timeout=PIP_TIMEOUT)
-        except Exception as e:
-            return False, f"Dependency install failed: {e}"
+    entry_name = script_path.name
 
-    # 2. Sitecustomize hook to automatically inject StringSession into Telethon & Pyrogram
-    sitecustomize_code = """
+    if language == "python":
+        # Python virtual environment & requirements
+        venv_dir = root / ".venv"
+        python_exe = venv_dir / "bin" / "python" if os.name != "nt" else venv_dir / "Scripts" / "python.exe"
+        
+        # 1. Virtual Environment & Automatic Package Installation
+        if (root / "requirements.txt").exists():
+            try:
+                if not venv_dir.exists():
+                    p1 = await asyncio.create_subprocess_exec(sys.executable, "-m", "venv", str(venv_dir))
+                    await p1.wait()
+                
+                p2 = await asyncio.create_subprocess_exec(
+                    str(python_exe if python_exe.exists() else sys.executable),
+                    "-m", "pip", "install", "-r", str(root / "requirements.txt")
+                )
+                await asyncio.wait_for(p2.wait(), timeout=PIP_TIMEOUT)
+            except Exception as e:
+                return False, f"Dependency install failed: {e}"
+
+        # 2. Sitecustomize hook to automatically inject StringSession into Telethon & Pyrogram
+        sitecustomize_code = """
 import os
 import sys
 
@@ -413,30 +489,52 @@ if session_str:
     except Exception:
         pass
 """
-    try:
-        (root / "sitecustomize.py").write_text(sitecustomize_code.strip(), encoding="utf-8")
-    except Exception:
-        pass
+        try:
+            (root / "sitecustomize.py").write_text(sitecustomize_code.strip(), encoding="utf-8")
+        except Exception:
+            pass
 
-    env = os.environ.copy()
-    env.update({
-        "API_ID": str(api_id),
-        "API_HASH": api_hash,
-        "SESSION_STRING": session_string,
-        "PHONE_NUMBER": phone,
-        "PYTHONUNBUFFERED": "1",
-        "PYTHONIOENCODING": "utf-8",
-        "PYTHONPATH": str(root) + os.pathsep + env.get("PYTHONPATH", ""),
-    })
-    
-    exe = str(python_exe) if python_exe.exists() else sys.executable
+        env = os.environ.copy()
+        env.update({
+            "API_ID": str(api_id),
+            "API_HASH": api_hash,
+            "SESSION_STRING": session_string,
+            "PHONE_NUMBER": phone,
+            "PYTHONUNBUFFERED": "1",
+            "PYTHONIOENCODING": "utf-8",
+            "PYTHONPATH": str(root) + os.pathsep + env.get("PYTHONPATH", ""),
+        })
+        
+        exe = str(python_exe) if python_exe.exists() else sys.executable
+        cmd = [exe, str(script_path)]
+
+    else:  # nodejs
+        # Ensure package.json exists
+        pkg = generate_package_json(root, entry_name)
+        # Install dependencies if package.json has dependencies
+        if pkg.exists():
+            try:
+                proc = await asyncio.create_subprocess_exec("npm", "install", cwd=str(root))
+                await asyncio.wait_for(proc.wait(), timeout=PIP_TIMEOUT)
+            except Exception as e:
+                return False, f"npm install failed: {e}"
+        
+        env = os.environ.copy()
+        env.update({
+            "API_ID": str(api_id),
+            "API_HASH": api_hash,
+            "SESSION_STRING": session_string,
+            "PHONE_NUMBER": phone,
+        })
+        exe = "node"
+        cmd = [exe, str(script_path)]
 
     log_path = root / "runtime.log"
     log_file = open(log_path, "a", encoding="utf-8", buffering=1)
     log_file.write(f"\n===== START at {time.ctime()} =====\n")
     
     proc = subprocess.Popen(
-        [exe, str(script_path)],
+        cmd,
         cwd=str(root),
         env=env,
         stdout=log_file,
@@ -529,7 +627,7 @@ async def animate_connecting(msg):
             break
 
 async def animate_deploy(msg):
-    frames = ["🚀 Deploying `▱▱▱`", "🚀 Deploying `▰▱▱`", "🚀 Deploying `▰▰▱`", "🚀 Deploying `▰▰▰`"]
+    frames = ["🚀 Deploying `▱▱▱`", "🚀 Deploying `▰▱▱`", "🚀 Deploying `▰▰▱`", "🚀 Deploying `▰▰▰`", "🚀 Deploying `▰▰▰` ✨"]
     for frame in frames:
         try:
             await msg.edit_text(frame, parse_mode=ParseMode.HTML)
@@ -538,7 +636,7 @@ async def animate_deploy(msg):
             break
 
 async def animate_otp_verify(msg):
-    frames = ["🔐 Verifying OTP `·`", "🔐 Verifying OTP `··`", "🔐 Verifying OTP `···`"]
+    frames = ["🔐 Verifying OTP `·`", "🔐 Verifying OTP `··`", "🔐 Verifying OTP `···`", "🔐 Verifying OTP `✔`"]
     for frame in frames:
         try:
             await msg.edit_text(frame, parse_mode=ParseMode.HTML)
@@ -620,7 +718,7 @@ async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         f"❓ {bold('Help & Commands')}\n{DIV}\n\n"
         f"🔹 /start      – Welcome dashboard\n"
-        f"🔹 /host       – Upload and deploy a script\n"
+        f"🔹 /host       – Upload and deploy a script (Python or Node.js)\n"
         f"🔹 /myaccounts – Manage, stop, and view logs\n"
         f"🔹 /status     – Check running status\n"
         f"🔹 /support    – Contact support\n"
@@ -669,7 +767,7 @@ async def host_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await reply(
         f"{TOP}\n║  📤  {bold('Upload Script')}  📤  ║\n{BOTTOM}\n\n"
-        f"Please send your <code>.py</code> or <code>.zip</code> file.\n"
+        f"Please send your <code>.py</code> or <code>.js</code> file (or a ZIP).\n"
         f"The system will scan for requirements and prepare the container.\n\n"
         f"💡 <i>Send /cancel to abort at any time</i>",
         parse_mode=ParseMode.HTML,
@@ -684,8 +782,8 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return UPLOAD_WAIT_FILE
 
     name = doc.file_name
-    if not (name.lower().endswith(".py") or name.lower().endswith(".zip")):
-        await update.message.reply_text("❌ Only .py or .zip files are supported.")
+    if not (name.lower().endswith(".py") or name.lower().endswith(".js") or name.lower().endswith(".zip")):
+        await update.message.reply_text("❌ Only .py, .js, or .zip files are supported.")
         return UPLOAD_WAIT_FILE
 
     if doc.file_size and doc.file_size > MAX_UPLOAD_MB * 1024 * 1024:
@@ -708,6 +806,7 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_file = await context.bot.get_file(doc.file_id)
     await tg_file.download_to_drive(custom_path=str(incoming))
 
+    # Determine language from file extension
     if name.lower().endswith(".zip"):
         ok, zmsg = safe_extract_zip(incoming, root)
         try:
@@ -718,14 +817,40 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(root, ignore_errors=True)
             await msg.edit_text(f"❌ {esc(zmsg)}")
             return ConversationHandler.END
+        # After extraction, we need to find the entrypoint
+        # First, detect language from extracted files
+        py_files = [p for p in root.rglob("*.py") if ".venv" not in p.parts and "__pycache__" not in p.parts]
+        js_files = [p for p in root.rglob("*.js") if "node_modules" not in p.parts]
+        if py_files and not js_files:
+            language = "python"
+        elif js_files and not py_files:
+            language = "nodejs"
+        elif py_files and js_files:
+            # Prefer Python? Or ask user? We'll default to Python if main.py exists
+            if (root / "main.py").exists():
+                language = "python"
+            elif (root / "index.js").exists():
+                language = "nodejs"
+            else:
+                language = "python"  # default
+        else:
+            shutil.rmtree(root, ignore_errors=True)
+            await msg.edit_text("❌ No .py or .js files found in ZIP.")
+            return ConversationHandler.END
+        entry = find_entrypoint(root, language)
+        if not entry:
+            shutil.rmtree(root, ignore_errors=True)
+            await msg.edit_text("❌ No entrypoint found (main.py, index.js, etc.).")
+            return ConversationHandler.END
     else:
-        shutil.move(str(incoming), str(root / "main.py"))
-
-    entry = find_entrypoint(root)
-    if not entry:
-        shutil.rmtree(root, ignore_errors=True)
-        await msg.edit_text("❌ No Python entrypoint found (main.py or single .py).")
-        return ConversationHandler.END
+        # Single file
+        if name.lower().endswith(".py"):
+            language = "python"
+            shutil.move(str(incoming), str(root / "main.py"))
+        else:
+            language = "nodejs"
+            shutil.move(str(incoming), str(root / "index.js"))
+        entry = find_entrypoint(root, language)
 
     result = scan_script(entry)
     if not result.get("ok"):
@@ -733,50 +858,50 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Scan failed: {esc(result.get('reason', 'Unknown'))}")
         return ConversationHandler.END
 
-    # Auto-generate requirements.txt if not present
-    req_path = root / "requirements.txt"
-    if not req_path.exists() and result.get("imports"):
-        try:
-            std_libs = set(sys.stdlib_module_names)
-        except AttributeError:
-            std_libs = {
-                'os', 'sys', 'time', 'json', 're', 'asyncio', 'logging', 'hashlib', 'threading', 
-                'math', 'random', 'datetime', 'collections', 'pathlib', 'subprocess', 'shutil', 
-                'typing', 'zipfile', 'ast', 'html', 'sqlite3', 'urllib', 'base64', 'binascii',
-                'socket', 'ssl', 'tempfile', 'uuid', 'warnings', 'io', 'functools', 'itertools',
-                'string', 'struct', 'traceback', 'types', 'weakref', 'abc', 'argparse', 'contextlib'
-            }
-        
-        third_party = []
-        for imp in result["imports"]:
-            imp_name = imp.split(".")[0]
-            if imp_name not in std_libs and not imp_name.startswith("_") and imp_name != entry.stem:
-                if imp_name == "bs4":
-                    third_party.append("beautifulsoup4")
-                elif imp_name == "telethon":
-                    third_party.append("Telethon")
-                elif imp_name == "pyrogram":
-                    third_party.append("Pyrogram")
-                elif imp_name == "telegram":
-                    third_party.append("python-telegram-bot")
-                elif imp_name == "cv2":
-                    third_party.append("opencv-python")
-                elif imp_name == "PIL":
-                    third_party.append("Pillow")
-                elif imp_name == "yaml":
-                    third_party.append("PyYAML")
-                else:
-                    third_party.append(imp_name)
-                    
-        third_party = list(set(third_party))
-        if third_party:
-            with open(req_path, "w", encoding="utf-8") as f:
-                f.write("\n".join(third_party))
+    # Auto-generate requirements.txt for Python if not present
+    if language == "python":
+        req_path = root / "requirements.txt"
+        if not req_path.exists() and result.get("imports"):
+            try:
+                std_libs = set(sys.stdlib_module_names)
+            except AttributeError:
+                std_libs = {
+                    'os', 'sys', 'time', 'json', 're', 'asyncio', 'logging', 'hashlib', 'threading',
+                    'math', 'random', 'datetime', 'collections', 'pathlib', 'subprocess', 'shutil',
+                    'typing', 'zipfile', 'ast', 'html', 'sqlite3', 'urllib', 'base64', 'binascii',
+                    'socket', 'ssl', 'tempfile', 'uuid', 'warnings', 'io', 'functools', 'itertools',
+                    'string', 'struct', 'traceback', 'types', 'weakref', 'abc', 'argparse', 'contextlib'
+                }
+            third_party = []
+            for imp in result["imports"]:
+                imp_name = imp.split(".")[0]
+                if imp_name not in std_libs and not imp_name.startswith("_") and imp_name != entry.stem:
+                    if imp_name == "bs4":
+                        third_party.append("beautifulsoup4")
+                    elif imp_name == "telethon":
+                        third_party.append("Telethon")
+                    elif imp_name == "pyrogram":
+                        third_party.append("Pyrogram")
+                    elif imp_name == "telegram":
+                        third_party.append("python-telegram-bot")
+                    elif imp_name == "cv2":
+                        third_party.append("opencv-python")
+                    elif imp_name == "PIL":
+                        third_party.append("Pillow")
+                    elif imp_name == "yaml":
+                        third_party.append("PyYAML")
+                    else:
+                        third_party.append(imp_name)
+            third_party = list(set(third_party))
+            if third_party:
+                with open(req_path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(third_party))
 
     context.user_data["pending_slot"] = slot
     context.user_data["pending_entry"] = str(entry.relative_to(root))
     context.user_data["pending_name"] = name
     context.user_data["scan_result"] = result
+    context.user_data["language"] = language
 
     phone = result.get("phone")
     account_data = {
@@ -787,11 +912,12 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "hosted": False,
         "is_stopped": False,
         "uploaded_at": int(time.time()),
-        "has_requirements": (root / "requirements.txt").exists(),
+        "has_requirements": (root / "requirements.txt").exists() or (root / "package.json").exists(),
         "imports": result["imports"],
         "api_id": result.get("api_id"),
         "api_hash": result.get("api_hash"),
         "warnings": result.get("warnings", []),
+        "language": language,
     }
     context.user_data["account_data"] = account_data
 
@@ -929,13 +1055,15 @@ async def _deploy_script(update, context, uid, slot, session_string, phone):
 
     root = script_root(uid, slot)
     entry = root / account_data["entrypoint"]
-    ok, result_msg = await start_script(uid, slot, entry, session_string, TELEGRAM_API_ID, TELEGRAM_API_HASH, phone)
+    language = account_data.get("language", "python")
+    ok, result_msg = await start_script(uid, slot, entry, session_string, TELEGRAM_API_ID, TELEGRAM_API_HASH, phone, language)
 
     if ok:
         success_text = (
             f"{TOP}\n║  🎉  {bold('Deployed & Online 24/7')}  🎉  ║\n{BOTTOM}\n\n"
             f"✅ Your script <code>{esc(account_data['name'])}</code> is now active.\n"
-            f"📱 Connected to: <code>{esc(phone)}</code>\n\n"
+            f"📱 Connected to: <code>{esc(phone)}</code>\n"
+            f"🖥️ Language: {bold(account_data['language'].upper())}\n\n"
             f"Use /myaccounts to View Logs, Stop, or Restart."
         )
         await msg.edit_text(success_text, parse_mode=ParseMode.HTML)
@@ -976,11 +1104,13 @@ async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
         phone = _phone_label(acct)
         is_alive = is_running(uid, slot)
         is_stopped = acct.get("is_stopped", False)
+        language = acct.get("language", "python").upper()
+        lang_emoji = "🐍" if language == "PYTHON" else "🟨"
         
         status_icon = "🟢 Active" if is_alive else ("⏸ Stopped" if is_stopped else "🔴 Crashed")
         uptime = get_uptime(uid, slot) if is_alive else "N/A"
         
-        text = f"⚙️ {bold(f'Userbot #{slot+1}')} | {status_icon}\n📱 <code>{esc(phone)}</code>\n⏱ Uptime: {uptime}"
+        text = f"⚙️ {bold(f'Userbot #{slot+1}')} | {status_icon}\n📱 <code>{esc(phone)}</code>\n⏱ Uptime: {uptime}\n{lang_emoji} Language: {language}"
         
         kb = [
             [
@@ -1014,7 +1144,8 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uptime = get_uptime(uid, slot) if alive else "—"
         icon = "🟢" if alive else "🔴"
         phone = _phone_label(acct)
-        lines.append(f"{icon} {bold(f'#{slot+1}')} — <code>{esc(phone)}</code>\n   ⏱️ {uptime}")
+        lang = acct.get("language", "python").upper()
+        lines.append(f"{icon} {bold(f'#{slot+1}')} — <code>{esc(phone)}</code> ({lang})\n   ⏱️ {uptime}")
         
     await update.message.reply_text(
         f"{TOP}\n║  📊  {bold('System Status')}  📊  ║\n{BOTTOM}\n\n" + "\n\n".join(lines),
@@ -1077,7 +1208,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         root = script_root(uid, slot)
         entry = root / acct["entrypoint"]
-        ok, msg = await start_script(uid, slot, entry, acct.get("session_string"), TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""))
+        language = acct.get("language", "python")
+        ok, msg = await start_script(uid, slot, entry, acct.get("session_string"), TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""), language)
         
         if ok:
             await query.message.reply_text(f"✅ Userbot #{slot+1} successfully restarted.")
@@ -1104,7 +1236,8 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             add_account(uid, acct)
             root = script_root(uid, slot)
             entry = root / acct["entrypoint"]
-            ok, msg = await start_script(uid, slot, entry, acct.get("session_string"), TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""))
+            language = acct.get("language", "python")
+            ok, msg = await start_script(uid, slot, entry, acct.get("session_string"), TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""), language)
             if ok:
                 await query.message.reply_text(f"▶️ Userbot #{slot+1} started.")
             else:
@@ -1189,7 +1322,8 @@ async def cmd_restartall(update: Update, context: ContextTypes.DEFAULT_TYPE):
             entry = root / acct["entrypoint"]
             if not entry.exists():
                 continue
-            ok, _ = await start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""))
+            language = acct.get("language", "python")
+            ok, _ = await start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""), language)
             if ok:
                 count += 1
     await msg.edit_text(f"✅ Restarted {count} 24/7 scripts across all users.")
@@ -1341,7 +1475,8 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
                 entry = root / acct["entrypoint"]
                 if not entry.exists():
                     continue
-                await start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""))
+                language = acct.get("language", "python")
+                await start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""), language)
 
 # ─────────────────────────────────────────────────────────────────────────
 #  MAIN LOOP
@@ -1369,7 +1504,8 @@ async def post_init(app: Application):
             entry = root / acct["entrypoint"]
             if not entry.exists():
                 continue
-            ok, _ = await start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""))
+            language = acct.get("language", "python")
+            ok, _ = await start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""), language)
             if ok:
                 count += 1
     logging.info(f"Auto-started {count} userbots into 24/7 hosting state.")
