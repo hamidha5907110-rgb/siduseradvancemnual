@@ -1,2 +1,8 @@
-python-telegram-bot[job-queue]==20.7
-telethon==1.36.0
+python-telegram-bot[job-queue]>=21.0
+telethon>=1.36.0
+tgcrypto>=1.2.5
+aiohttp>=3.9.0
+aiofiles>=23.2.0
+requests>=2.31.0
+Pillow>=10.0.0
+cryptg>=0.4.0
