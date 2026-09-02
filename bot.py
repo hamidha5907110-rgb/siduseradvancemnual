@@ -2,6 +2,7 @@
 """
 PURE HOSTER — Userbot script hoster with animated flow
 Combines Telethon login with user-provided scripts.
+
 Environment variables:
   BOT_TOKEN          required
   OWNER_ID           required
@@ -55,7 +56,7 @@ from telethon.sessions import StringSession
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
 OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
-SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@fxrsale").strip()
+SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_USERBOTS = max(1, int(os.getenv("MAX_USERBOTS", "50") or 50))
 MAX_SCRIPTS_PER_USER = max(1, int(os.getenv("MAX_SCRIPTS_PER_USER", "3") or 3))
 TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID", "2040"))
@@ -403,17 +404,13 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
         req_path = root / "requirements.txt"
         discovered_imports = collect_all_imports(root)
         
-        # Fallback for Python < 3.10
-        try:
-            std_libs = set(sys.stdlib_module_names)
-        except AttributeError:
-            std_libs = {
-                'os', 'sys', 'time', 'json', 're', 'asyncio', 'logging', 'hashlib', 'threading',
-                'math', 'random', 'datetime', 'collections', 'pathlib', 'subprocess', 'shutil',
-                'typing', 'zipfile', 'ast', 'html', 'sqlite3', 'urllib', 'base64', 'binascii',
-                'socket', 'ssl', 'tempfile', 'uuid', 'warnings', 'io', 'functools', 'itertools',
-                'string', 'struct', 'traceback', 'types', 'weakref', 'abc', 'argparse', 'contextlib'
-            }
+        std_libs = set(getattr(sys, "stdlib_module_names", {
+            'os', 'sys', 'time', 'json', 're', 'asyncio', 'logging', 'hashlib', 'threading',
+            'math', 'random', 'datetime', 'collections', 'pathlib', 'subprocess', 'shutil',
+            'typing', 'zipfile', 'ast', 'html', 'sqlite3', 'urllib', 'base64', 'binascii',
+            'socket', 'ssl', 'tempfile', 'uuid', 'warnings', 'io', 'functools', 'itertools',
+            'string', 'struct', 'traceback', 'types', 'weakref', 'abc', 'argparse', 'contextlib'
+        }))
 
         needed_packages = {"telethon", "pyrogram", "tgcrypto", "aiohttp", "aiofiles", "requests"}
         for imp in discovered_imports:
@@ -875,11 +872,6 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             language = "nodejs"
             shutil.move(str(incoming), str(root / "index.js"))
         entry = find_entrypoint(root, language)
-
-    if entry is None:
-        shutil.rmtree(root, ignore_errors=True)
-        await msg.edit_text("❌ Could not locate main script.")
-        return ConversationHandler.END
 
     result = scan_script(entry)
 
