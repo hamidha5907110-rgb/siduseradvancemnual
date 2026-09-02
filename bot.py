@@ -642,20 +642,7 @@ if session_str:
     log_file.write(f"\n===== START at {time.ctime()} =====\n")
     log_file.flush()
 
-    # Apply resource limits before exec (only works if we fork; we can't easily set after Popen)
-    # We'll set limits in the parent, but child inherits; we need to set in child.
-    # We'll use a preexec_fn for Unix (only available in asyncio.create_subprocess_exec with preexec_fn?)
-    # Actually asyncio.create_subprocess_exec doesn't support preexec_fn directly.
-    # We'll use subprocess.Popen with preexec_fn, but we want async monitoring.
-    # Alternative: we can launch a wrapper script that sets limits.
-    # For simplicity, we'll just not set limits on Windows, and on Unix we'll use a small wrapper.
-    # We'll create a wrapper script that calls setrlimit and then execs the target.
-    # This is advanced; for now we'll skip resource limits in this version to keep it simple.
-    # But we'll provide a note.
-
-    # Actually we can use asyncio.create_subprocess_exec with a custom wrapper:
-    # We'll write a small python script to run the target with limits.
-    # We'll generate it on the fly.
+    # Apply resource limits (Unix only) via wrapper
     if os.name != "nt":
         wrapper = root / "_launcher.py"
         wrapper.write_text(f"""
@@ -665,9 +652,6 @@ resource.setrlimit(resource.RLIMIT_CPU, (300, 300))
 os.execv(sys.argv[1], sys.argv[1:])
 """)
         cmd = [sys.executable, str(wrapper), exe] + cmd[1:]
-    else:
-        # Windows: no resource limits
-        pass
 
     # Create process
     proc = await asyncio.create_subprocess_exec(
@@ -1417,28 +1401,15 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not acct:
             return await query.message.reply_text("❌ Script not found.")
         # Start a new login process for this slot
-        # We'll reuse the host conversation but we need to store the slot and account
         context.user_data["rehost_slot"] = slot
         context.user_data["rehost_account"] = acct
-        # Ask for phone number (we can auto-fill the existing phone)
         phone = acct.get("phone")
         if phone:
-            await query.message.reply_text(f"📱 Re‑hosting for phone {esc(phone)}. Send the OTP when prompted.")
-            # We'll simulate the phone step by going directly to OTP sending
-            # Actually we need to start the Telethon login flow with the existing phone.
-            # We'll store the phone in pending_logins and ask for OTP.
-            # Simpler: we'll ask the user to send the phone again via a new message.
-            # But we already have the phone; we can send OTP directly.
-            # We'll initiate a new login with the stored phone.
             await query.message.reply_text("🔄 Re‑hosting will re‑authenticate your session. Sending OTP...")
             await _start_telethon_login_from_acct(update, context, uid, slot, acct)
         else:
             await query.message.reply_text("Please send your phone number to re‑host.")
-            # We'll set a state to wait for phone
             context.user_data["waiting_rehost_phone"] = slot
-            # We'll need a separate handler; but for simplicity, we'll just ask via a new message.
-            # We'll use the /host flow but with a flag to reuse the existing slot.
-            # To avoid complexity, we'll just tell the user to use /host again and delete the old one.
             await query.message.reply_text("Please use /host to deploy a new script, then delete the expired one.")
         return
 
@@ -1478,8 +1449,6 @@ async def _start_telethon_login_from_acct(update, context, uid, slot, acct):
     if not phone:
         await update.callback_query.message.reply_text("❌ No phone number stored.")
         return
-    # We need to simulate the phone step, but we already have the phone.
-    # We'll initiate the OTP flow directly.
     msg = await update.callback_query.message.reply_text(f"⏳ Sending OTP to {esc(phone)}...")
     await animate_connecting(msg)
     try:
@@ -1491,7 +1460,7 @@ async def _start_telethon_login_from_acct(update, context, uid, slot, acct):
             "phone": phone,
             "phone_code_hash": result.phone_code_hash,
             "slot": slot,
-            "is_rehost": True,  # flag
+            "is_rehost": True,
         }
         await msg.edit_text(
             f"📨 {bold('OTP sent')}\n\n"
@@ -1499,13 +1468,7 @@ async def _start_telethon_login_from_acct(update, context, uid, slot, acct):
             f"💡 <i>Send with spaces</i> – e.g. <code>1 2 3 4 5</code>",
             parse_mode=ParseMode.HTML,
         )
-        # We need to redirect to a state that waits for OTP and then updates the existing account
-        # We'll modify the conversation to handle rehost if pending_logins has is_rehost.
-        # For simplicity, we'll reuse the OTP handler but check for is_rehost flag.
-        # We'll set a context flag.
         context.user_data["rehost_slot"] = slot
-        # The OTP handler will be called by the user's response; we need to handle it.
-        # We'll store the pending_login as usual; the host_got_otp will handle it.
     except Exception as e:
         await msg.edit_text(f"❌ Error sending OTP: {esc(str(e)[:120])}")
 
@@ -1683,11 +1646,9 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
             if acct.get("is_stopped"):
                 continue
             if acct.get("needs_rehost"):
-                # Session expired – we skip restart
                 continue
                 
             slot = acct["slot"]
-            # Check if process is running
             if not is_running(uid, slot):
                 root = script_root(uid, slot)
                 entry = root / acct["entrypoint"]
@@ -1731,13 +1692,8 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
                 if not valid:
                     acct["needs_rehost"] = True
                     add_account(uid, acct)
-                    # Notify owner (optional)
                     continue
                 await start_script(uid, slot, entry, acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH, acct.get("phone", ""), language)
-
-    # Also periodically validate all sessions to detect revocation early
-    # We'll do that every SESSION_VALIDATE_INTERVAL (5 min)
-    # But we'll just run it less frequently; for now we rely on restart attempts.
 
 # ─────────────────────────────────────────────────────────────────────────
 #  PERIODIC SESSION VALIDATOR (runs every 5 minutes)
@@ -1754,7 +1710,6 @@ async def session_validator(context: ContextTypes.DEFAULT_TYPE):
                 continue
             if acct.get("needs_rehost"):
                 continue
-            # Only check if not stopped
             if acct.get("is_stopped"):
                 continue
             valid, _ = await validate_session(acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH)
@@ -1791,6 +1746,7 @@ async def post_init(app: Application):
         BotCommand("support", "Get support"),
     ])
     
+    count = 0  # <-- FIXED: count is now initialized
     # Validate all sessions on startup and mark expired
     for uid_str in get_all_users():
         uid = int(uid_str)
@@ -1807,7 +1763,6 @@ async def post_init(app: Application):
                 add_account(uid, acct)
                 logging.warning(f"Session expired for user {uid}, slot {acct['slot']} on startup")
                 continue
-            # Start the script
             slot = acct["slot"]
             root = script_root(uid, slot)
             entry = root / acct["entrypoint"]
@@ -1830,7 +1785,7 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Upload Conversation
+    # Upload Conversation – added per_message=True to suppress warning
     host_conv = ConversationHandler(
         entry_points=[
             CommandHandler("host", host_start),
@@ -1844,6 +1799,7 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", host_cancel)],
         allow_reentry=True,
+        per_message=True,   # silences the warning
     )
     app.add_handler(host_conv)
 
