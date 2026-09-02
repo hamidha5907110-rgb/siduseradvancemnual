@@ -416,14 +416,6 @@ def rotate_log(log_path: Path, max_size: int = 10 * 1024 * 1024):
         backup = log_path.with_suffix(".log.old")
         shutil.move(str(log_path), str(backup))
 
-def set_resource_limits():
-    try:
-        import resource
-        resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, -1))
-        resource.setrlimit(resource.RLIMIT_CPU, (300, 300))
-    except:
-        pass
-
 async def validate_session(session_string: str, api_id: int, api_hash: str) -> Tuple[bool, Optional[str]]:
     try:
         client = TelegramClient(StringSession(session_string), api_id, api_hash)
@@ -591,6 +583,11 @@ if session_str:
             "API_ID": str(api_id),
             "API_HASH": api_hash,
             "SESSION_STRING": session_string,
+            "STRING_SESSION": session_string,
+            "SESSION": session_string,
+            "TELETHON_SESSION": session_string,
+            "PYROGRAM_SESSION": session_string,
+            "TG_SESSION": session_string,
             "PHONE_NUMBER": phone,
             "PYTHONUNBUFFERED": "1",
             "PYTHONIOENCODING": "utf-8",
@@ -614,6 +611,11 @@ if session_str:
             "API_ID": str(api_id),
             "API_HASH": api_hash,
             "SESSION_STRING": session_string,
+            "STRING_SESSION": session_string,
+            "SESSION": session_string,
+            "TELETHON_SESSION": session_string,
+            "PYROGRAM_SESSION": session_string,
+            "TG_SESSION": session_string,
             "PHONE_NUMBER": phone,
         })
         exe = "node"
@@ -622,16 +624,6 @@ if session_str:
     log_file = open(log_path, "a", encoding="utf-8", buffering=1)
     log_file.write(f"\n===== START at {time.ctime()} =====\n")
     log_file.flush()
-
-    if os.name != "nt":
-        wrapper = root / "_launcher.py"
-        wrapper.write_text(f"""
-import os, sys, resource
-resource.setrlimit(resource.RLIMIT_AS, (1024*1024*1024, -1))
-resource.setrlimit(resource.RLIMIT_CPU, (300, 300))
-os.execv(sys.argv[1], sys.argv[1:])
-""")
-        cmd = [sys.executable, str(wrapper), exe] + cmd[1:]
 
     proc = await asyncio.create_subprocess_exec(
         *cmd,
