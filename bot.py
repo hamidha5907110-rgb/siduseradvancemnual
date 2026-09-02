@@ -1,16 +1,7 @@
 #!/usr/bin/env python3
 """
 PURE HOSTER — Userbot script hoster with animated flow
-Combines Telethon login with user-provided scripts.
-
-Environment variables:
-  BOT_TOKEN          required
-  OWNER_ID           required
-  SUPPORT_USERNAME   optional, default @support
-  MAX_USERBOTS       optional, default 50
-  TELEGRAM_API_ID    optional (your hoster bot's API ID)
-  TELEGRAM_API_HASH  optional
-  MAX_SCRIPTS_PER_USER optional, default 3
+Combines Telethon login with user-provided scripts and SQLite DB.
 """
 
 import asyncio
@@ -27,6 +18,7 @@ import sys
 import threading
 import time
 import zipfile
+import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -70,7 +62,6 @@ SESSION_VALIDATE_INTERVAL = 300  # seconds between session checks
 if not BOT_TOKEN or not OWNER_ID:
     raise ValueError("BOT_TOKEN and OWNER_ID must be set in environment.")
 
-# Common mapping from import name to installable PyPI package
 PACKAGE_MAP = {
     "PIL": "Pillow",
     "cv2": "opencv-python",
@@ -114,55 +105,72 @@ PACKAGE_MAP = {
 }
 
 # ─────────────────────────────────────────────────────────────────────────
-#  DATABASE (JSON, thread-safe)
+#  DATABASE (SQLite 3, thread-safe)
 # ─────────────────────────────────────────────────────────────────────────
 
 DB_DIR = Path(os.getcwd()) / "data"
 DB_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = DB_DIR / "hoster.db"
+
 _db_lock = threading.Lock()
 
-def _db_path(*parts):
-    p = DB_DIR.joinpath(*parts)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return p
+def _init_db():
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS store (
+                        key TEXT PRIMARY KEY,
+                        value TEXT
+                     )''')
+        conn.commit()
+        conn.close()
 
-def _read_json(path, default):
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except:
+_init_db()
+
+def _read_db(key, default):
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT value FROM store WHERE key = ?", (key,))
+        row = c.fetchone()
+        conn.close()
+        if row:
+            try:
+                return json.loads(row[0])
+            except:
+                return default
         return default
 
-def _write_json(path, data):
+def _write_db(key, value):
     with _db_lock:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        tmp.replace(path)
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("REPLACE INTO store (key, value) VALUES (?, ?)", (key, json.dumps(value, ensure_ascii=False)))
+        conn.commit()
+        conn.close()
 
 def user_exists(uid):
-    return _db_path("users", str(uid), "meta.json").exists()
+    return _read_db(f"meta_{uid}", None) is not None
 
 def save_user_meta(uid, data):
-    path = _db_path("users", str(uid), "meta.json")
-    existing = _read_json(path, {})
+    existing = _read_db(f"meta_{uid}", {})
     existing.update(data)
-    _write_json(path, existing)
+    _write_db(f"meta_{uid}", existing)
 
 def get_all_users():
-    users_dir = DB_DIR / "users"
-    if not users_dir.exists():
-        return []
-    return [d.name for d in users_dir.iterdir() if d.is_dir() and d.name.isdigit()]
+    with _db_lock:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT key FROM store WHERE key LIKE 'meta_%'")
+        rows = c.fetchall()
+        conn.close()
+        return [row[0].replace("meta_", "") for row in rows]
 
 def user_count():
     return len(get_all_users())
 
-def _accts_path(uid):
-    return _db_path("users", str(uid), "accounts.json")
-
 def get_accounts(uid):
-    return _read_json(_accts_path(uid), [])
+    return _read_db(f"accts_{uid}", [])
 
 def get_account(uid, slot):
     for a in get_accounts(uid):
@@ -174,11 +182,11 @@ def add_account(uid, acct):
     accounts = get_accounts(uid)
     accounts = [a for a in accounts if a.get("slot") != acct.get("slot")]
     accounts.append(acct)
-    _write_json(_accts_path(uid), accounts)
+    _write_db(f"accts_{uid}", accounts)
 
 def remove_account(uid, slot):
     accounts = [a for a in get_accounts(uid) if a.get("slot") != slot]
-    _write_json(_accts_path(uid), accounts)
+    _write_db(f"accts_{uid}", accounts)
 
 def hosted_count():
     total = 0
@@ -188,40 +196,34 @@ def hosted_count():
                 total += 1
     return total
 
-def _sudo_path():
-    return _db_path("sudo.json")
-
 def get_sudo_users():
-    return _read_json(_sudo_path(), [])
+    return _read_db("sudo", [])
 
 def add_sudo(uid):
     s = get_sudo_users()
     if uid not in s:
         s.append(uid)
-        _write_json(_sudo_path(), s)
+        _write_db("sudo", s)
 
 def remove_sudo(uid):
     s = [x for x in get_sudo_users() if x != uid]
-    _write_json(_sudo_path(), s)
+    _write_db("sudo", s)
 
 def is_sudo(uid):
     return uid == OWNER_ID or uid in get_sudo_users()
 
-def _blocked_path():
-    return _db_path("blocked.json")
-
 def get_blocked():
-    return _read_json(_blocked_path(), [])
+    return _read_db("blocked", [])
 
 def block_user(uid):
     b = get_blocked()
     if uid not in b:
         b.append(uid)
-        _write_json(_blocked_path(), b)
+        _write_db("blocked", b)
 
 def unblock_user(uid):
     b = [x for x in get_blocked() if x != uid]
-    _write_json(_blocked_path(), b)
+    _write_db("blocked", b)
 
 def is_blocked(uid):
     return uid in get_blocked()
@@ -378,7 +380,6 @@ def stop_script(uid: int, slot: int):
     if proc:
         try:
             proc.terminate()
-            # Wait a bit to let it exit
             asyncio.create_task(_wait_and_kill(proc))
         except:
             pass
@@ -392,9 +393,7 @@ async def _wait_and_kill(proc):
         except:
             pass
 
-# ---------- Cross-platform file locking ----------
 def _acquire_lock(lock_path: Path, timeout: int = 10) -> bool:
-    """Try to acquire a lock using O_CREAT|O_EXCL with retries."""
     import os as _os
     start = time.time()
     while time.time() - start < timeout:
@@ -412,25 +411,20 @@ def _release_lock(lock_path: Path):
     except:
         pass
 
-# ---------- Log rotation ----------
 def rotate_log(log_path: Path, max_size: int = 10 * 1024 * 1024):
     if log_path.exists() and log_path.stat().st_size > max_size:
         backup = log_path.with_suffix(".log.old")
         shutil.move(str(log_path), str(backup))
 
-# ---------- Resource limits (Unix only) ----------
 def set_resource_limits():
     try:
         import resource
-        # 1 GB virtual memory, 5 minutes CPU time
         resource.setrlimit(resource.RLIMIT_AS, (1024 * 1024 * 1024, -1))
         resource.setrlimit(resource.RLIMIT_CPU, (300, 300))
     except:
-        pass  # Not supported on all platforms
+        pass
 
-# ---------- Session validation ----------
 async def validate_session(session_string: str, api_id: int, api_hash: str) -> Tuple[bool, Optional[str]]:
-    """Check if a session string is still valid and return (valid, phone_or_error)."""
     try:
         client = TelegramClient(StringSession(session_string), api_id, api_hash)
         await client.connect()
@@ -440,16 +434,12 @@ async def validate_session(session_string: str, api_id: int, api_hash: str) -> T
     except Exception as e:
         return False, str(e)
 
-# ---------- Enhanced start_script (async, with session check and monitoring) ----------
 async def start_script(uid: int, slot: int, script_path: Path, session_string: str,
                        api_id: int, api_hash: str, phone: str = "", language: str = "python"):
-    """Launch the script as an async subprocess, validate session first."""
     key = (uid, slot)
 
-    # Validate session before starting
     valid, info = await validate_session(session_string, api_id, api_hash)
     if not valid:
-        # Mark account as needing rehost
         acct = get_account(uid, slot)
         if acct:
             acct["needs_rehost"] = True
@@ -457,13 +447,11 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
             add_account(uid, acct)
         return False, f"Session expired: {info}. Please /host again."
 
-    # Stop any existing process
     stop_script(uid, slot)
 
     root = script_path.parent
     entry_name = script_path.name
 
-    # Rotate log
     log_path = root / "runtime.log"
     rotate_log(log_path)
 
@@ -471,7 +459,6 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
         venv_dir = root / ".venv"
         python_exe = venv_dir / "bin" / "python" if os.name != "nt" else venv_dir / "Scripts" / "python.exe"
         
-        # 1. Ensure Virtual Environment exists
         if not venv_dir.exists():
             try:
                 p1 = await asyncio.create_subprocess_exec(sys.executable, "-m", "venv", str(venv_dir))
@@ -481,7 +468,6 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
 
         exe_path = str(python_exe if python_exe.exists() else sys.executable)
 
-        # 2. Build or update requirements.txt with all scanned & essential packages
         req_path = root / "requirements.txt"
         discovered_imports = collect_all_imports(root)
         
@@ -503,7 +489,6 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
             with open(req_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(sorted(needed_packages)))
 
-        # Run pip install with lock
         lock_path = req_path.with_suffix(".lock")
         if _acquire_lock(lock_path, timeout=60):
             try:
@@ -516,7 +501,6 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
             finally:
                 _release_lock(lock_path)
 
-        # 3. sitecustomize.py – same as before, but we keep it
         sitecustomize_code = """
 import os
 import sys
@@ -525,7 +509,6 @@ import subprocess
 
 session_str = os.environ.get('SESSION_STRING')
 
-# --- On-the-fly automatic requirement installer ---
 _orig_import = builtins.__import__
 _failed_modules = set()
 
@@ -568,7 +551,6 @@ def _auto_install_import(name, globals=None, locals=None, fromlist=(), level=0):
 
 builtins.__import__ = _auto_install_import
 
-# --- Automatic Telethon & Pyrogram session injection ---
 if session_str:
     try:
         import telethon
@@ -618,7 +600,7 @@ if session_str:
         exe = exe_path
         cmd = [exe, str(script_path)]
 
-    else:  # Node.js
+    else:
         pkg = generate_package_json(root, entry_name)
         if pkg.exists():
             try:
@@ -637,12 +619,10 @@ if session_str:
         exe = "node"
         cmd = [exe, str(script_path)]
 
-    # Launch process as async subprocess
     log_file = open(log_path, "a", encoding="utf-8", buffering=1)
     log_file.write(f"\n===== START at {time.ctime()} =====\n")
     log_file.flush()
 
-    # Apply resource limits (Unix only) via wrapper
     if os.name != "nt":
         wrapper = root / "_launcher.py"
         wrapper.write_text(f"""
@@ -653,7 +633,6 @@ os.execv(sys.argv[1], sys.argv[1:])
 """)
         cmd = [sys.executable, str(wrapper), exe] + cmd[1:]
 
-    # Create process
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         cwd=str(root),
@@ -668,32 +647,26 @@ os.execv(sys.argv[1], sys.argv[1:])
     _script_files[key] = script_path
     _log_files[key] = log_path
 
-    # Start a monitor task
     task = asyncio.create_task(_monitor_process(uid, slot, proc, log_path))
     _monitor_tasks[key] = task
 
     return True, "Running"
 
 async def _monitor_process(uid: int, slot: int, proc: asyncio.subprocess.Process, log_path: Path):
-    """Wait for process exit and log it."""
     key = (uid, slot)
     try:
         await proc.wait()
         exit_code = proc.returncode
-        # Log exit
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"\n===== EXIT with code {exit_code} at {time.ctime()} =====\n")
     except asyncio.CancelledError:
-        # Process was stopped by us
         pass
     finally:
-        # Remove from dicts
         _procs.pop(key, None)
         _start_times.pop(key, None)
         _script_files.pop(key, None)
         _log_files.pop(key, None)
         _monitor_tasks.pop(key, None)
-        # The watchdog will restart if needed
 
 def is_running(uid: int, slot: int) -> bool:
     key = (uid, slot)
@@ -701,7 +674,6 @@ def is_running(uid: int, slot: int) -> bool:
     if not proc:
         return False
     if proc.returncode is not None:
-        # Process finished
         _procs.pop(key, None)
         _start_times.pop(key, None)
         _script_files.pop(key, None)
@@ -754,7 +726,7 @@ TOP = "╔═══════════════════════�
 BOTTOM = "╚══════════════════════════╝"
 
 # ─────────────────────────────────────────────────────────────────────────
-#  ANIMATION HELPERS (unchanged)
+#  ANIMATION HELPERS
 # ─────────────────────────────────────────────────────────────────────────
 
 async def animate_scanning(msg, steps=6, delay=0.15):
@@ -809,7 +781,7 @@ async def simulate_button_animation(query, text="⏳ Processing"):
         pass
 
 # ─────────────────────────────────────────────────────────────────────────
-#  BOT UI HELPERS (unchanged)
+#  BOT UI HELPERS
 # ─────────────────────────────────────────────────────────────────────────
 
 START_TIME = time.time()
@@ -842,7 +814,7 @@ def main_keyboard(uid):
     ])
 
 # ─────────────────────────────────────────────────────────────────────────
-#  COMMANDS (unchanged)
+#  COMMANDS
 # ─────────────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -891,7 +863,7 @@ async def cmd_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─────────────────────────────────────────────────────────────────────────
-#  HOST CONVERSATION (upload + Telethon login) – unchanged
+#  HOST CONVERSATION
 # ─────────────────────────────────────────────────────────────────────────
 
 UPLOAD_WAIT_FILE, UPLOAD_WAIT_PHONE, UPLOAD_WAIT_OTP, UPLOAD_WAIT_2FA = range(4)
@@ -1027,7 +999,7 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "api_hash": result.get("api_hash"),
         "warnings": [],
         "language": language,
-        "needs_rehost": False,   # new flag
+        "needs_rehost": False,
     }
     context.user_data["account_data"] = account_data
 
@@ -1190,7 +1162,7 @@ async def host_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ─────────────────────────────────────────────────────────────────────────
-#  CONTROL PANEL (MYACCOUNTS, LOGS, RESTART, TOGGLE) – modified to show "rehost needed"
+#  CONTROL PANEL
 # ─────────────────────────────────────────────────────────────────────────
 
 async def cmd_myaccounts(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1277,7 +1249,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─────────────────────────────────────────────────────────────────────────
-#  CALLBACK HANDLERS – modified with rehost support
+#  CALLBACK HANDLERS
 # ─────────────────────────────────────────────────────────────────────────
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1400,7 +1372,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         acct = get_account(uid, slot)
         if not acct:
             return await query.message.reply_text("❌ Script not found.")
-        # Start a new login process for this slot
         context.user_data["rehost_slot"] = slot
         context.user_data["rehost_account"] = acct
         phone = acct.get("phone")
@@ -1443,7 +1414,6 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.message.reply_text("❌ Already removed.")
         return
 
-# Helper to start login from existing phone (for rehost)
 async def _start_telethon_login_from_acct(update, context, uid, slot, acct):
     phone = acct.get("phone")
     if not phone:
@@ -1473,7 +1443,7 @@ async def _start_telethon_login_from_acct(update, context, uid, slot, acct):
         await msg.edit_text(f"❌ Error sending OTP: {esc(str(e)[:120])}")
 
 # ─────────────────────────────────────────────────────────────────────────
-#  ADMIN COMMANDS (unchanged)
+#  ADMIN COMMANDS
 # ─────────────────────────────────────────────────────────────────────────
 
 async def owner_only(update: Update) -> bool:
@@ -1632,7 +1602,7 @@ async def cmd_secretfunction(update: Update, context: ContextTypes.DEFAULT_TYPE)
     )
 
 # ─────────────────────────────────────────────────────────────────────────
-#  AUTO HEALTH CHECK (Enhanced with session validation and rehost detection)
+#  AUTO HEALTH CHECK 
 # ─────────────────────────────────────────────────────────────────────────
 
 async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
@@ -1657,7 +1627,6 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
                         continue
                     language = acct.get("language", "python")
                     
-                    # Check log for missing requirements and auto-fulfill them before relaunching
                     log_path = root / "runtime.log"
                     if log_path.exists():
                         try:
@@ -1688,7 +1657,6 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
                         except Exception as e:
                             logging.warning(f"Auto-healer install failed: {e}")
 
-                    # Attempt restart, but validate session first
                     valid, _ = await validate_session(acct["session_string"], TELEGRAM_API_ID, TELEGRAM_API_HASH)
                     if not valid:
                         acct["needs_rehost"] = True
@@ -1699,11 +1667,10 @@ async def auto_health_check(context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Health check error: {e}", exc_info=True)
 
 # ─────────────────────────────────────────────────────────────────────────
-#  PERIODIC SESSION VALIDATOR (runs every 5 minutes)
+#  PERIODIC SESSION VALIDATOR
 # ─────────────────────────────────────────────────────────────────────────
 
 async def session_validator(context: ContextTypes.DEFAULT_TYPE):
-    """Check all active sessions and mark expired ones."""
     try:
         for uid_str in get_all_users():
             uid = int(uid_str)
@@ -1754,7 +1721,6 @@ async def post_init(app: Application):
         ])
         
         count = 0
-        # Validate all sessions on startup and mark expired
         for uid_str in get_all_users():
             uid = int(uid_str)
             if is_blocked(uid):
@@ -1781,7 +1747,6 @@ async def post_init(app: Application):
                     count += 1
         logging.info(f"Auto-started {count} userbots into 24/7 hosting state.")
 
-        # Schedule session validator every 5 minutes
         if app.job_queue:
             app.job_queue.run_repeating(session_validator, interval=SESSION_VALIDATE_INTERVAL, first=60)
         else:
@@ -1796,7 +1761,7 @@ def main():
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Upload Conversation – added per_message=True to suppress warning
+    # REMOVED per_message=True entirely so documents parse accurately
     host_conv = ConversationHandler(
         entry_points=[
             CommandHandler("host", host_start),
@@ -1810,18 +1775,15 @@ def main():
         },
         fallbacks=[CommandHandler("cancel", host_cancel)],
         allow_reentry=True,
-        per_message=True,   # silences the warning
     )
     app.add_handler(host_conv)
 
-    # Standard Commands
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(CommandHandler("help", cmd_help))
     app.add_handler(CommandHandler("support", cmd_support))
     app.add_handler(CommandHandler("myaccounts", cmd_myaccounts))
     app.add_handler(CommandHandler("status", cmd_status))
 
-    # Admin Commands
     app.add_handler(CommandHandler("restartall", cmd_restartall))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("block", cmd_block))
@@ -1832,10 +1794,8 @@ def main():
     app.add_handler(CommandHandler("refresh", cmd_refresh))
     app.add_handler(CommandHandler("secretfunction", cmd_secretfunction))
 
-    # Inline Keyboard Listener
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    # 24/7 Watchdog (Checks every 20 seconds, starts at 10s)
     if app.job_queue:
         app.job_queue.run_repeating(auto_health_check, interval=20, first=10)
     else:
