@@ -182,7 +182,7 @@ def is_blocked(uid):
     return uid in get_blocked()
 
 # ─────────────────────────────────────────────────────────────────────────
-#  SCRIPT SCANNER (Python & Node.js)
+#  PROCESSOR (Python & Node.js)
 # ─────────────────────────────────────────────────────────────────────────
 
 API_ID_NAMES = {"API_ID", "api_id", "TG_API_ID", "TELEGRAM_API_ID", "CLIENT_API_ID"}
@@ -190,9 +190,6 @@ API_HASH_NAMES = {"API_HASH", "api_hash", "TG_API_HASH", "TELEGRAM_API_HASH", "C
 API_ID_RE = re.compile(r"(?im)\b(?:API_ID|api_id|TG_API_ID|TELEGRAM_API_ID)\b\s*(?:[:=])\s*(?:int\(\s*)?[\"']?(\d{5,12})")
 API_HASH_RE = re.compile(r"(?im)\b(?:API_HASH|api_hash|TG_API_HASH|TELEGRAM_API_HASH)\b\s*(?:[:=])\s*(?:str\(\s*)?[\"']([A-Za-z0-9]{16,128})[\"']")
 PHONE_RE = re.compile(r"(?<!\d)(\+?[1-9]\d{7,14})(?!\d)")
-DANGEROUS_PATTERNS = [
-    (re.compile(r"os\.environ\.(get|__getitem__)\(\s*[\"'](BOT_TOKEN|OWNER_ID)[\"']", re.I), "Attempts to read hoster secrets"),
-]
 
 def _literal_value(node):
     if isinstance(node, ast.Constant):
@@ -268,7 +265,6 @@ def scan_script(path: Path) -> dict:
     except UnicodeDecodeError:
         return {"ok": False, "reason": "Only UTF-8 source accepted."}
     
-    # Detect language
     ext = path.suffix.lower()
     language = "python" if ext == ".py" else "nodejs" if ext == ".js" else "unknown"
     
@@ -280,29 +276,24 @@ def scan_script(path: Path) -> dict:
         return {"ok": False, "reason": "Unsupported file type. Use .py or .js"}
 
 def scan_python_script(text: str, path: Path) -> dict:
+    imports = set()
     try:
         tree = ast.parse(text, filename=str(path))
-    except SyntaxError as exc:
-        return {"ok": False, "reason": f"Syntax error line {exc.lineno}: {exc.msg}"}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports.update(alias.name.split(".")[0] for alias in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                imports.add(node.module.split(".")[0])
+    except Exception:
+        # Ignore syntax errors completely so we don't block userbot scripts
+        pass 
 
-    imports = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            imports.update(alias.name.split(".")[0] for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module:
-            imports.add(node.module.split(".")[0])
-
-    warnings = []
-    blocked = []
-    for rx, label in DANGEROUS_PATTERNS:
-        if rx.search(text):
-            warnings.append(label)
-            blocked.append(label)
-
-    aid, ahash = detect_api(text, tree)
+    aid, ahash = detect_api(text, None)
     phone = detect_phone(text)
+    
+    # Always returning ok: True so it NEVER blocks the file upload
     return {
-        "ok": not blocked,
+        "ok": True,
         "language": "python",
         "size": len(text.encode("utf-8")),
         "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
@@ -310,31 +301,27 @@ def scan_python_script(text: str, path: Path) -> dict:
         "api_id": aid,
         "api_hash": ahash,
         "phone": phone,
-        "warnings": warnings,
-        "blocked": blocked,
+        "warnings": [],
+        "blocked": [],
     }
 
 def scan_node_script(text: str, path: Path) -> dict:
-    # Simple detection for Node.js dependencies (require/import)
     imports = set()
     require_re = re.compile(r"(?:^|\s)require\s*\(\s*[\"']([^\"']+)[\"']\s*\)")
     import_re = re.compile(r"(?:^|\s)from\s+[\"']([^\"']+)[\"']")
+    
     for match in require_re.finditer(text):
         imports.add(match.group(1))
     for match in import_re.finditer(text):
         imports.add(match.group(1))
     
-    # Filter out built-in Node modules (common ones)
     builtins = {"fs", "path", "os", "http", "https", "net", "events", "stream", "buffer", "crypto", "zlib", "url", "querystring", "assert", "child_process", "cluster", "dns", "domain", "util", "vm", "v8", "process", "readline", "repl"}
     imports = {i for i in imports if not i.startswith(".") and i not in builtins}
     
-    aid, ahash = detect_api(text, None)  # we already have tree=None, but we can reuse
+    aid, ahash = detect_api(text, None) 
     phone = detect_phone(text)
-    warnings = []
-    # Check for dangerous environment reads (similar to Python)
-    if re.search(r"process\.env\.(BOT_TOKEN|OWNER_ID)", text):
-        warnings.append("Attempts to read hoster secrets via process.env")
     
+    # Always returning ok: True
     return {
         "ok": True,
         "language": "nodejs",
@@ -344,7 +331,7 @@ def scan_node_script(text: str, path: Path) -> dict:
         "api_id": aid,
         "api_hash": ahash,
         "phone": phone,
-        "warnings": warnings,
+        "warnings": [],
         "blocked": [],
     }
 
@@ -379,7 +366,6 @@ def find_entrypoint(root: Path, language: str) -> Optional[Path]:
         py_files = [p for p in root.rglob("*.py") if ".venv" not in p.parts and "__pycache__" not in p.parts]
         return py_files[0] if py_files else None
     elif language == "nodejs":
-        # Look for index.js, main.js, or any .js file
         for name in ["index.js", "main.js", "app.js", "server.js"]:
             p = root / name
             if p.exists():
@@ -437,7 +423,6 @@ async def start_script(uid: int, slot: int, script_path: Path, session_string: s
     entry_name = script_path.name
 
     if language == "python":
-        # Python virtual environment & requirements
         venv_dir = root / ".venv"
         python_exe = venv_dir / "bin" / "python" if os.name != "nt" else venv_dir / "Scripts" / "python.exe"
         
@@ -509,9 +494,7 @@ if session_str:
         cmd = [exe, str(script_path)]
 
     else:  # nodejs
-        # Ensure package.json exists
         pkg = generate_package_json(root, entry_name)
-        # Install dependencies if package.json has dependencies
         if pkg.exists():
             try:
                 proc = await asyncio.create_subprocess_exec("npm", "install", cwd=str(root))
@@ -602,13 +585,14 @@ BOTTOM = "╚══════════════════════�
 # ─────────────────────────────────────────────────────────────────────────
 
 async def animate_scanning(msg, steps=6, delay=0.15):
+    # Changed animation text to "Processing" since strict scanning is disabled
     frames = [
-        "🔎 Scanning `▱▱▱▱▱`",
-        "🔎 Scanning `▰▱▱▱▱`",
-        "🔎 Scanning `▰▰▱▱▱`",
-        "🔎 Scanning `▰▰▰▱▱`",
-        "🔎 Scanning `▰▰▰▰▱`",
-        "🔎 Scanning `▰▰▰▰▰`",
+        "🔎 Processing `▱▱▱▱▱`",
+        "🔎 Processing `▰▱▱▱▱`",
+        "🔎 Processing `▰▰▱▱▱`",
+        "🔎 Processing `▰▰▰▱▱`",
+        "🔎 Processing `▰▰▰▰▱`",
+        "🔎 Processing `▰▰▰▰▰`",
     ]
     for frame in frames[:steps]:
         try:
@@ -768,7 +752,7 @@ async def host_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await reply(
         f"{TOP}\n║  📤  {bold('Upload Script')}  📤  ║\n{BOTTOM}\n\n"
         f"Please send your <code>.py</code> or <code>.js</code> file (or a ZIP).\n"
-        f"The system will scan for requirements and prepare the container.\n\n"
+        f"The system will prepare your container for hosting.\n\n"
         f"💡 <i>Send /cancel to abort at any time</i>",
         parse_mode=ParseMode.HTML,
     )
@@ -790,7 +774,7 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ File exceeds {MAX_UPLOAD_MB} MB.")
         return UPLOAD_WAIT_FILE
 
-    msg = await update.message.reply_text("🔎 Scanning `▱▱▱▱▱`", parse_mode=ParseMode.HTML)
+    msg = await update.message.reply_text("🔎 Processing `▱▱▱▱▱`", parse_mode=ParseMode.HTML)
     await animate_scanning(msg)
 
     accounts = get_accounts(uid)
@@ -806,7 +790,6 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_file = await context.bot.get_file(doc.file_id)
     await tg_file.download_to_drive(custom_path=str(incoming))
 
-    # Determine language from file extension
     if name.lower().endswith(".zip"):
         ok, zmsg = safe_extract_zip(incoming, root)
         try:
@@ -817,8 +800,7 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.rmtree(root, ignore_errors=True)
             await msg.edit_text(f"❌ {esc(zmsg)}")
             return ConversationHandler.END
-        # After extraction, we need to find the entrypoint
-        # First, detect language from extracted files
+        
         py_files = [p for p in root.rglob("*.py") if ".venv" not in p.parts and "__pycache__" not in p.parts]
         js_files = [p for p in root.rglob("*.js") if "node_modules" not in p.parts]
         if py_files and not js_files:
@@ -826,13 +808,12 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         elif js_files and not py_files:
             language = "nodejs"
         elif py_files and js_files:
-            # Prefer Python? Or ask user? We'll default to Python if main.py exists
             if (root / "main.py").exists():
                 language = "python"
             elif (root / "index.js").exists():
                 language = "nodejs"
             else:
-                language = "python"  # default
+                language = "python"  
         else:
             shutil.rmtree(root, ignore_errors=True)
             await msg.edit_text("❌ No .py or .js files found in ZIP.")
@@ -843,7 +824,6 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text("❌ No entrypoint found (main.py, index.js, etc.).")
             return ConversationHandler.END
     else:
-        # Single file
         if name.lower().endswith(".py"):
             language = "python"
             shutil.move(str(incoming), str(root / "main.py"))
@@ -852,11 +832,8 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             shutil.move(str(incoming), str(root / "index.js"))
         entry = find_entrypoint(root, language)
 
+    # Process script to grab imports for requirements.txt (Never Blocks)
     result = scan_script(entry)
-    if not result.get("ok"):
-        shutil.rmtree(root, ignore_errors=True)
-        await msg.edit_text(f"❌ Scan failed: {esc(result.get('reason', 'Unknown'))}")
-        return ConversationHandler.END
 
     # Auto-generate requirements.txt for Python if not present
     if language == "python":
@@ -922,7 +899,7 @@ async def host_got_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["account_data"] = account_data
 
     await msg.edit_text(
-        f"✅ {bold('Script scanned successfully')}\n"
+        f"✅ {bold('File processed successfully')}\n"
         f"{DIV}\n"
         f"📱 {bold('Phone number required')}\n"
         f"Please send the Telegram phone number to login and link this userbot.\n"
