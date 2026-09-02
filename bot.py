@@ -30,6 +30,15 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+# ─── VERSION CHECK ──────────────────────────────────────────────────────
+import telegram
+if telegram.__version__ < "20.3":
+    raise ImportError(
+        f"python-telegram-bot version 20.3 or higher is required (found {telegram.__version__}). "
+        "Please upgrade: pip install --upgrade python-telegram-bot>=20.8"
+    )
+# ─────────────────────────────────────────────────────────────────────────
+
 from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
