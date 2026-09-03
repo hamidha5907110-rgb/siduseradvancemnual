@@ -1,29 +1,10 @@
 #!/usr/bin/env python3
 """
-SID MANUAL USERBOT HOSTER V11 – with full Telegram login flow
+SID MANUAL USERBOT HOSTER V12 – Integrated login + auto‑host
 
-A Telegram bot that hosts USER-PROVIDED Python userbot scripts.
-This version adds a login flow (phone, OTP, 2FA) to create a session string
-that is injected into the userbot environment, so the script can run
-without re‑asking for credentials.
-
-Railway environment variables:
-  BOT_TOKEN                required
-  OWNER_ID                 required
-  SUPPORT_USERNAME         optional, default @support
-  MAX_RUNNING              optional, default 50
-  FREE_SCRIPT_LIMIT        optional, default 3
-  PREMIUM_SCRIPT_LIMIT     optional, default 5
-  REFERRAL_TARGET          optional, default 5
-  ADMIN_IDS                optional comma separated additional admins
-
-Security notes:
-  - Uploaded scripts run as subprocesses with a sanitized environment.
-  - The bot token is never passed into uploaded scripts.
-  - API_ID/API_HASH are injected only when a per-user profile exists.
-  - Session string is stored per user and injected into the script.
-  - For real multi-tenant production use, isolate each script in a container
-    or separate Railway service. A subprocess is not a security sandbox.
+- Full upload flow: script → API ID → API hash → phone → OTP → password (if 2FA)
+- After login, the uploaded script is started automatically.
+- All user data (session, scripts, logs) is stored per user.
 """
 
 import ast
@@ -37,11 +18,8 @@ import re
 import shutil
 import signal
 import sys
-import subprocess
-import venv
 import zipfile
 import time
-import uuid
 import html
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -58,18 +36,18 @@ from telegram.ext import (
     filters,
 )
 
-# NEW: optional Telethon for login
+# Telethon for login
 try:
     from telethon import TelegramClient, errors
 except ImportError:
     TelegramClient = None
-    log.warning("Telethon not installed. Login features will be disabled.")
+    # We'll handle missing dependency later.
 
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_RUNNING = max(1, int(os.getenv("MAX_RUNNING", "50") or 50))
 FREE_SCRIPT_LIMIT = max(1, int(os.getenv("FREE_SCRIPT_LIMIT", "3") or 3))
@@ -106,14 +84,12 @@ logging.basicConfig(
 log = logging.getLogger("sid-hoster")
 
 # ---------------------------------------------------------------------------
-# VISUAL STYLE / ANIMATION
+# VISUAL STYLE
 # ---------------------------------------------------------------------------
 DIV = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 TOP = "╭──────────────────────────────╮"
 BOT = "╰──────────────────────────────╯"
 SPARK = "✦ · ✧ · ✦ · ✧ · ✦"
-BAR_FULL = "██████████"
-BAR_EMPTY = "░░░░░░░░░░"
 
 def esc(t: str) -> str:
     return html.escape(str(t), quote=False)
@@ -125,12 +101,6 @@ def progress_bar(value: int, total: int, width: int = 10) -> str:
     total = max(1, total)
     filled = max(0, min(width, int((value / total) * width)))
     return "█" * filled + "░" * (width - filled)
-
-def bold(t: str) -> str:
-    return f"<b>{t}</b>"
-
-def mono(t: str) -> str:
-    return f"<code>{t}</code>"
 
 def user_dir(uid: int) -> Path:
     p = USERS / str(uid)
@@ -151,7 +121,7 @@ def api_path(uid: int) -> Path:
 def scripts_path(uid: int) -> Path:
     return user_dir(uid) / "scripts.json"
 
-def session_path(uid: int) -> Path:      # NEW
+def session_path(uid: int) -> Path:
     return user_dir(uid) / "session.string"
 
 class JSONStore:
@@ -174,9 +144,8 @@ class JSONStore:
         tmp.replace(path)
 
 # ---------------------------------------------------------------------------
-# USER / REFERRAL / PREMIUM DATA
+# USER DATA HELPERS
 # ---------------------------------------------------------------------------
-
 def get_meta(uid: int) -> dict:
     return JSONStore.load(meta_path(uid), {})
 
@@ -270,9 +239,8 @@ def register_user(uid: int, name: str, referrer: Optional[int] = None) -> dict:
     return get_meta(uid)
 
 # ---------------------------------------------------------------------------
-# PROCESS MANAGER / PER-SCRIPT ENVIRONMENTS
+# PROCESS MANAGER (unchanged from V11)
 # ---------------------------------------------------------------------------
-
 PROCS: Dict[Tuple[int, int], asyncio.subprocess.Process] = {}
 START_TIMES: Dict[Tuple[int, int], float] = {}
 PROC_LOGS: Dict[Tuple[int, int], Path] = {}
@@ -500,7 +468,7 @@ async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
                 "TELEGRAM_API_HASH": str(api["api_hash"]),
             })
 
-        # NEW: inject session string if available
+        # Inject session if available
         session_path_user = session_path(uid)
         if session_path_user.exists():
             try:
@@ -603,9 +571,8 @@ async def health_loop(app: Application) -> None:
                         log.warning("health restart uid=%s slot=%s: %s", uid, slot, msg)
 
 # ---------------------------------------------------------------------------
-# SCRIPT SCANNER / API DETECTION
+# SCRIPT SCANNER (unchanged)
 # ---------------------------------------------------------------------------
-
 API_ID_NAMES = {"API_ID", "api_id", "TG_API_ID", "TELEGRAM_API_ID", "CLIENT_API_ID"}
 API_HASH_NAMES = {"API_HASH", "api_hash", "TG_API_HASH", "TELEGRAM_API_HASH", "CLIENT_API_HASH"}
 API_ID_RE = re.compile(r"(?im)\b(?:API_ID|api_id|TG_API_ID|TELEGRAM_API_ID)\b\s*(?:[:=])\s*(?:int\(\s*)?[\"']?(\d{5,12})")
@@ -743,9 +710,8 @@ def find_entrypoint(root: Path) -> Optional[Path]:
     return py_files[0] if py_files else None
 
 # ---------------------------------------------------------------------------
-# UI / RUNTIME HELPERS
+# UI / HELPERS
 # ---------------------------------------------------------------------------
-
 def process_status(uid: int, slot: int) -> tuple[bool, str]:
     proc = PROCS.get((uid, slot))
     alive = bool(proc and proc.returncode is None)
@@ -773,13 +739,6 @@ def compact_script_line(uid: int, item: dict) -> str:
     alive, runtime = process_status(uid, slot)
     icon = "🟢" if alive else "🔴"
     return f"{icon} <b>#{slot+1}</b> {name[:40]}  <code>{runtime}</code>"
-
-async def typing_animation(message, frames: list[str], delay: float = 0.06):
-    await animate(message, frames, delay)
-
-# ---------------------------------------------------------------------------
-# UI HELPERS
-# ---------------------------------------------------------------------------
 
 async def animate(msg, frames: List[str], delay: float = 0.08) -> None:
     for frame in frames:
@@ -832,9 +791,8 @@ def dashboard_text(uid: int) -> str:
     )
 
 # ---------------------------------------------------------------------------
-# COMMANDS
+# COMMANDS & CONVERSATIONS
 # ---------------------------------------------------------------------------
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     name = update.effective_user.first_name or "User"
@@ -897,173 +855,80 @@ async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.HTML,
     )
 
-# -- NEW: LOGIN CONVERSATION ------------------------------------------------
-
-LOGIN_PHONE, LOGIN_CODE, LOGIN_PASSWORD = range(10, 13)
-
-async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Start the login process."""
+# ---------------------------------------------------------------------------
+# LOGIN FUNCTIONS (reusable)
+# ---------------------------------------------------------------------------
+async def perform_login(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    phone: str,
+    code: Optional[str] = None,
+    password: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Internal: handles login flow and stores session. Returns (success, message)."""
     if TelegramClient is None:
-        await update.message.reply_text(
-            "❌ Telethon is not installed. Please install it first."
-        )
-        return ConversationHandler.END
-
+        return False, "Telethon is not installed."
     uid = update.effective_user.id
     api = get_api(uid)
     if not api.get("api_id") or not api.get("api_hash"):
-        await update.message.reply_text(
-            "❌ You must set your API ID and hash first using /setapi.\n"
-            "Example: /setapi 1234567 abcdefghijklmnopqrstuvwxyz"
-        )
-        return ConversationHandler.END
+        return False, "API credentials missing. Use /setapi."
 
-    context.user_data["login_api"] = api
-    await update.message.reply_text(
-        "📱 <b>Telegram Login</b>\n\n"
-        "Send your phone number with country code (e.g., +1234567890).",
-        parse_mode=ParseMode.HTML,
-    )
-    return LOGIN_PHONE
-
-async def login_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    phone = update.message.text.strip()
-    if not phone.startswith("+") or not phone[1:].isdigit():
-        await update.message.reply_text("❌ Invalid phone number. Use format: +1234567890")
-        return LOGIN_PHONE
-
-    uid = update.effective_user.id
-    api = context.user_data["login_api"]
-    client = TelegramClient(
-        session=str(user_dir(uid) / "temp_login"),   # temporary session
-        api_id=api["api_id"],
-        api_hash=api["api_hash"],
-    )
-    await client.connect()
-    try:
-        await client.send_code_request(phone)
-    except errors.FloodWaitError as e:
-        await update.message.reply_text(f"⏳ Too many attempts. Wait {e.seconds} seconds.")
-        await client.disconnect()
-        return ConversationHandler.END
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error sending code: {e}")
-        await client.disconnect()
-        return ConversationHandler.END
-
-    context.user_data["login_client"] = client
-    context.user_data["login_phone"] = phone
-    await update.message.reply_text(
-        "📲 <b>Code sent</b>\n\n"
-        "Send the OTP code you received via Telegram (or your app).",
-        parse_mode=ParseMode.HTML,
-    )
-    return LOGIN_CODE
-
-async def login_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    code = update.message.text.strip()
-    if not code.isdigit():
-        await update.message.reply_text("❌ Invalid code. Send only digits.")
-        return LOGIN_CODE
-
-    client = context.user_data.get("login_client")
-    phone = context.user_data.get("login_phone")
-    if not client or not phone:
-        await update.message.reply_text("❌ Session lost. Please start again with /login.")
-        return ConversationHandler.END
-
-    try:
-        await client.sign_in(phone=phone, code=code)
-        # Success: obtain session string
-        session_string = await client.export_session_string()
-        # Store session string
-        uid = update.effective_user.id
-        session_path_user = session_path(uid)
-        session_path_user.write_text(session_string, encoding="utf-8")
-        await client.disconnect()
-        context.user_data.pop("login_client", None)
-        context.user_data.pop("login_phone", None)
-        await update.message.reply_text(
-            f"✅ <b>Login successful</b>\n\n"
-            f"Session stored securely. Your scripts will now use this session.",
-            parse_mode=ParseMode.HTML,
-        )
-        return ConversationHandler.END
-    except errors.SessionPasswordNeededError:
-        await update.message.reply_text(
-            "🔐 <b>2FA required</b>\n\n"
-            "Send your two‑factor password.",
-            parse_mode=ParseMode.HTML,
-        )
-        return LOGIN_PASSWORD
-    except errors.FloodWaitError as e:
-        await update.message.reply_text(f"⏳ Too many attempts. Wait {e.seconds}s.")
-        await client.disconnect()
-        return ConversationHandler.END
-    except errors.PhoneCodeExpiredError:
-        await update.message.reply_text("❌ The code has expired. Start again with /login.")
-        await client.disconnect()
-        return ConversationHandler.END
-    except errors.PhoneCodeInvalidError:
-        await update.message.reply_text("❌ Invalid code. Try again.")
-        return LOGIN_CODE
-    except Exception as e:
-        await update.message.reply_text(f"❌ Login error: {e}")
-        await client.disconnect()
-        return ConversationHandler.END
-
-async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    password = update.message.text.strip()
     client = context.user_data.get("login_client")
     if not client:
-        await update.message.reply_text("❌ Session lost. Start again with /login.")
-        return ConversationHandler.END
+        # Start new client
+        client = TelegramClient(
+            session=str(user_dir(uid) / "temp_login"),
+            api_id=api["api_id"],
+            api_hash=api["api_hash"],
+        )
+        await client.connect()
+        context.user_data["login_client"] = client
 
     try:
-        await client.sign_in(password=password)
-        session_string = await client.export_session_string()
-        uid = update.effective_user.id
-        session_path_user = session_path(uid)
-        session_path_user.write_text(session_string, encoding="utf-8")
-        await client.disconnect()
-        context.user_data.pop("login_client", None)
-        context.user_data.pop("login_phone", None)
-        await update.message.reply_text(
-            f"✅ <b>Login successful</b>\n\n"
-            f"Session stored securely.",
-            parse_mode=ParseMode.HTML,
-        )
-        return ConversationHandler.END
+        if code is None and password is None:
+            # First step: send code
+            await client.send_code_request(phone)
+            context.user_data["login_phone"] = phone
+            return True, "code_sent"
+        elif code is not None:
+            # Verify code
+            try:
+                await client.sign_in(phone=phone, code=code)
+            except errors.SessionPasswordNeededError:
+                return True, "password_needed"
+            # Success
+            session_string = await client.export_session_string()
+            session_path(uid).write_text(session_string, encoding="utf-8")
+            await client.disconnect()
+            context.user_data.pop("login_client", None)
+            context.user_data.pop("login_phone", None)
+            return True, "success"
+        elif password is not None:
+            # Verify 2FA
+            await client.sign_in(password=password)
+            session_string = await client.export_session_string()
+            session_path(uid).write_text(session_string, encoding="utf-8")
+            await client.disconnect()
+            context.user_data.pop("login_client", None)
+            context.user_data.pop("login_phone", None)
+            return True, "success"
+        else:
+            return False, "Invalid login state"
     except errors.FloodWaitError as e:
-        await update.message.reply_text(f"⏳ Wait {e.seconds}s and try again.")
-        return LOGIN_PASSWORD
+        return False, f"Flood wait: {e.seconds}s"
+    except errors.PhoneCodeExpiredError:
+        return False, "Code expired"
+    except errors.PhoneCodeInvalidError:
+        return False, "Invalid code"
     except errors.PasswordHashInvalidError:
-        await update.message.reply_text("❌ Invalid password. Try again.")
-        return LOGIN_PASSWORD
+        return False, "Invalid password"
     except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-        await client.disconnect()
-        return ConversationHandler.END
-
-async def login_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    client = context.user_data.pop("login_client", None)
-    if client:
-        await client.disconnect()
-    await update.message.reply_text("🚫 Login cancelled.")
-    return ConversationHandler.END
-
-async def logout_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = update.effective_user.id
-    sp = session_path(uid)
-    if sp.exists():
-        sp.unlink()
-        await update.message.reply_text("✅ Session cleared. You will need to login again.")
-    else:
-        await update.message.reply_text("ℹ️ No session stored.")
+        return False, f"Error: {e}"
 
 # ---------------------------------------------------------------------------
-# UPLOAD COMMANDS (unchanged except for a note about login)
+# UPLOAD CONVERSATION (integrated login)
 # ---------------------------------------------------------------------------
+UPLOAD_WAIT_FILE, UPLOAD_WAIT_API_ID, UPLOAD_WAIT_API_HASH, UPLOAD_WAIT_PHONE, UPLOAD_WAIT_CODE, UPLOAD_WAIT_PASSWORD = range(1, 7)
 
 async def begin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
@@ -1073,53 +938,30 @@ async def begin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             parse_mode=ParseMode.HTML,
         )
         return ConversationHandler.END
+    # Check if session exists; if not, we'll ask later.
     await update.effective_message.reply_text(
         f"📤 <b>UPLOAD USERBOT SCRIPT</b>\n\n"
         f"Send a <code>.py</code> file or a <code>.zip</code> with your script + requirements.txt.\n"
         f"I will syntax-check it and inspect API configuration.\n\n"
-        f"After upload, you can set up your Telegram session using /login.",
+        f"After upload, you will be guided through API setup and Telegram login.",
         parse_mode=ParseMode.HTML,
     )
-    return 1
-
-async def _finish_ready_script(update, context, uid: int, slot: int, result: dict, display_name: str, api_state: str) -> int:
-    item = find_script(uid, slot) or {}
-    warn_text = ""
-    if result.get("warnings"):
-        warn_text = "\n⚠️ <b>Scanner notes:</b>\n" + "\n".join(f"• {esc(x)}" for x in result["warnings"])
-    kb = InlineKeyboardMarkup([
-        [premium_button("Host Now", "🚀", f"host:{slot}")],
-        [premium_button("Delete", "🗑️", f"delete:{slot}"), premium_button("Close", "❌", "close")],
-    ])
-    await update.message.reply_text(
-        f"✅ <b>Script scanned successfully</b>\n\n"
-        f"📄 Name: <code>{esc(display_name)}</code>\n"
-        f"📦 Size: <b>{result['size']:,}</b> bytes\n"
-        f"🔐 SHA256: <code>{result['sha256'][:20]}…</code>\n"
-        f"🧩 Entrypoint: <code>{esc(item.get('entrypoint','main.py'))}</code>\n"
-        f"📦 Dependencies: {'✅ requirements.txt found' if item.get('has_requirements') else 'ℹ️ none supplied'}\n\n"
-        f"{api_state}{warn_text}\n\n"
-        f"Press <b>Host Now</b> to run the uploaded script unchanged.\n"
-        f"To set up Telegram login, use /login.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=kb,
-    )
-    return ConversationHandler.END
+    return UPLOAD_WAIT_FILE
 
 async def receive_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
     doc = update.message.document
     if not doc or not doc.file_name:
         await update.message.reply_text("❌ Send a .py file or a ZIP containing the userbot.", parse_mode=ParseMode.HTML)
-        return 1
+        return UPLOAD_WAIT_FILE
     name = doc.file_name
     lower = name.lower()
     if not (lower.endswith(".py") or lower.endswith(".zip")):
         await update.message.reply_text("❌ Only .py or .zip uploads are supported.", parse_mode=ParseMode.HTML)
-        return 1
+        return UPLOAD_WAIT_FILE
     if doc.file_size and doc.file_size > MAX_UPLOAD_MB * 1024 * 1024:
         await update.message.reply_text(f"❌ File exceeds {MAX_UPLOAD_MB} MB.", parse_mode=ParseMode.HTML)
-        return 1
+        return UPLOAD_WAIT_FILE
     if len(get_scripts(uid)) >= limit_for(uid):
         await update.message.reply_text("⚠️ Your script limit has been reached.", parse_mode=ParseMode.HTML)
         return ConversationHandler.END
@@ -1170,7 +1012,7 @@ async def receive_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         save_api(uid, detected_id, detected_hash)
         api_state = "✅ API ID/hash detected in script and saved to your private profile."
     elif api.get("api_id") and api.get("api_hash"):
-        api_state = "✅ Your saved API profile will be injected when the script starts."
+        api_state = "✅ Your saved API profile will be used."
     else:
         api_state = "⚠️ API ID/hash are missing."
 
@@ -1190,86 +1032,346 @@ async def receive_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "crash_count": 0,
     }
     replace_script(uid, entry)
+    context.user_data["upload_slot"] = slot
+    context.user_data["upload_name"] = name
 
-    if not ((detected_id and detected_hash) or (api.get("api_id") and api.get("api_hash"))):
-        context.user_data["pending_slot"] = slot
-        context.user_data["pending_warn"] = ""
-        context.user_data["pending_name"] = name
+    # If API missing, ask for it
+    if not (api.get("api_id") and api.get("api_hash")):
         await msg.edit_text(
             f"✅ <b>Script scanned successfully</b>\n\n"
             f"📄 <code>{esc(name)}</code>\n"
             f"📦 {result['size']:,} bytes\n"
             f"🔐 <code>{result['sha256'][:20]}…</code>\n\n"
             f"🔐 <b>API profile missing</b>\n"
-            f"Send your Telegram API ID now. It will be stored only for your user profile.",
+            f"Send your Telegram API ID now (numeric).",
             parse_mode=ParseMode.HTML,
         )
-        return 2
+        return UPLOAD_WAIT_API_ID
 
-    await msg.edit_text("✅ <b>Scan complete.</b> Preparing hosting controls…", parse_mode=ParseMode.HTML)
-    return await _finish_ready_script(update, context, uid, slot, result, name, api_state)
+    # API exists, now check session
+    if session_path(uid).exists():
+        # Already logged in → host directly
+        await msg.edit_text("✅ <b>You are already logged in. Hosting now...</b>", parse_mode=ParseMode.HTML)
+        ok, detail = await start_script(uid, slot)
+        if ok:
+            await msg.edit_text(
+                f"🚀 <b>Script hosted successfully</b>\n\n"
+                f"#{slot+1} <code>{esc(name)}</code> is running.",
+                parse_mode=ParseMode.HTML,
+                reply_markup=InlineKeyboardMarkup([
+                    [premium_button("📊 Status", "status", f"status:{slot}")],
+                    [premium_button("📜 Logs", "logs", f"logs:{slot}")],
+                    [premium_button("Close", "❌", "close")]
+                ])
+            )
+        else:
+            await msg.edit_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    else:
+        # Need login: ask for phone
+        await msg.edit_text(
+            f"✅ <b>Script uploaded</b>\n\n"
+            f"Now you need to log in to your Telegram account.\n"
+            f"Send your phone number with country code (e.g., +1234567890).",
+            parse_mode=ParseMode.HTML,
+        )
+        return UPLOAD_WAIT_PHONE
 
+# API ID
 async def receive_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     raw = update.message.text.strip()
     if not raw.isdigit() or not (10000 <= int(raw) <= 999999999999):
         await update.message.reply_text("❌ Invalid API ID. Send the numeric API ID from my.telegram.org.")
-        return 2
+        return UPLOAD_WAIT_API_ID
     context.user_data["api_id_pending"] = int(raw)
     api = get_api(update.effective_user.id)
     if api.get("api_hash"):
         save_api(update.effective_user.id, int(raw), api["api_hash"])
-        slot = context.user_data.get("pending_slot")
         context.user_data.pop("api_id_pending", None)
-        await update.message.reply_text(
-            f"✅ <b>API ID saved.</b> Existing API hash reused.\n\n"
-            f"You can now set up Telegram login with /login, or press Host Now.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([
-                [premium_button("Host Now", "🚀", f"host:{int(slot)}")],
-                [premium_button("Setup Login", "🔐", f"login:{int(slot)}")],
-            ])
-        )
-        return ConversationHandler.END
-    await update.message.reply_text("🔑 Now send your Telegram API hash.", parse_mode=ParseMode.HTML)
-    return 3
+        # Now check session
+        uid = update.effective_user.id
+        slot = context.user_data.get("upload_slot")
+        if session_path(uid).exists():
+            ok, detail = await start_script(uid, slot)
+            if ok:
+                await update.message.reply_text(
+                    f"🚀 <b>Script hosted successfully</b>\n\n"
+                    f"#{slot+1} is running.",
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await update.message.reply_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
+            return ConversationHandler.END
+        else:
+            await update.message.reply_text("📱 Now send your phone number (with country code).")
+            return UPLOAD_WAIT_PHONE
+    else:
+        await update.message.reply_text("🔑 Now send your Telegram API hash.")
+        return UPLOAD_WAIT_API_HASH
 
 async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     api_hash = update.message.text.strip()
     api_id = context.user_data.get("api_id_pending")
     if not api_id or not re.fullmatch(r"[A-Za-z0-9]{16,128}", api_hash):
         await update.message.reply_text("❌ Invalid API hash. Please send the hash shown at my.telegram.org.")
-        return 3
+        return UPLOAD_WAIT_API_HASH
     uid = update.effective_user.id
     save_api(uid, int(api_id), api_hash)
-    slot = context.user_data.get("pending_slot")
-    name = context.user_data.get("pending_name", "main.py")
     context.user_data.pop("api_id_pending", None)
-    context.user_data.pop("pending_slot", None)
-    await update.message.reply_text(
-        f"✅ <b>API profile saved</b>\n\n"
-        f"📄 <code>{esc(name)}</code> is ready to host.\n\n"
-        f"Your API profile will be reused for future uploads.\n"
-        f"Use /login to set up Telegram session.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup([
-            [premium_button("Host Now", "🚀", f"host:{int(slot)}")],
-            [premium_button("Setup Login", "🔐", f"login:{int(slot)}"), premium_button("Delete", "🗑️", f"delete:{int(slot)}")],
-            [premium_button("Close", "❌", "close")],
-        ]),
+    # Now check session
+    if session_path(uid).exists():
+        slot = context.user_data.get("upload_slot")
+        ok, detail = await start_script(uid, slot)
+        if ok:
+            await update.message.reply_text(f"🚀 <b>Script hosted successfully</b>", parse_mode=ParseMode.HTML)
+        else:
+            await update.message.reply_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("📱 Now send your phone number (with country code).")
+        return UPLOAD_WAIT_PHONE
+
+# Phone
+async def upload_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    phone = update.message.text.strip()
+    if not phone.startswith("+") or not phone[1:].isdigit():
+        await update.message.reply_text("❌ Invalid phone. Use +1234567890")
+        return UPLOAD_WAIT_PHONE
+    uid = update.effective_user.id
+    api = get_api(uid)
+    if not api.get("api_id") or not api.get("api_hash"):
+        await update.message.reply_text("❌ API credentials missing. Please start over.")
+        return ConversationHandler.END
+    # Initiate login
+    client = TelegramClient(
+        session=str(user_dir(uid) / "temp_login"),
+        api_id=api["api_id"],
+        api_hash=api["api_hash"],
     )
-    return ConversationHandler.END
+    await client.connect()
+    try:
+        await client.send_code_request(phone)
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Too many attempts. Wait {e.seconds}s.")
+        await client.disconnect()
+        return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error sending code: {e}")
+        await client.disconnect()
+        return ConversationHandler.END
+
+    context.user_data["login_client"] = client
+    context.user_data["login_phone"] = phone
+    await update.message.reply_text(
+        "📲 <b>Code sent</b>\n\nSend the OTP code you received.",
+        parse_mode=ParseMode.HTML,
+    )
+    return UPLOAD_WAIT_CODE
+
+# Code
+async def upload_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip()
+    if not code.isdigit():
+        await update.message.reply_text("❌ Invalid code. Send only digits.")
+        return UPLOAD_WAIT_CODE
+
+    client = context.user_data.get("login_client")
+    phone = context.user_data.get("login_phone")
+    if not client or not phone:
+        await update.message.reply_text("❌ Session lost. Please start over.")
+        return ConversationHandler.END
+
+    try:
+        await client.sign_in(phone=phone, code=code)
+        # Success
+        session_string = await client.export_session_string()
+        uid = update.effective_user.id
+        session_path(uid).write_text(session_string, encoding="utf-8")
+        await client.disconnect()
+        context.user_data.pop("login_client", None)
+        context.user_data.pop("login_phone", None)
+        # Now host the script
+        slot = context.user_data.get("upload_slot")
+        if slot is None:
+            await update.message.reply_text("❌ No pending upload. Please start again.")
+            return ConversationHandler.END
+        ok, detail = await start_script(uid, slot)
+        if ok:
+            await update.message.reply_text(
+                f"🚀 <b>Login successful! Script hosted.</b>\n\n"
+                f"#{slot+1} is now running.",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.message.reply_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    except errors.SessionPasswordNeededError:
+        await update.message.reply_text(
+            "🔐 <b>2FA required</b>\n\nSend your two‑factor password.",
+            parse_mode=ParseMode.HTML,
+        )
+        return UPLOAD_WAIT_PASSWORD
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Wait {e.seconds}s and try again.")
+        return UPLOAD_WAIT_CODE
+    except errors.PhoneCodeExpiredError:
+        await update.message.reply_text("❌ Code expired. Start over.")
+        return ConversationHandler.END
+    except errors.PhoneCodeInvalidError:
+        await update.message.reply_text("❌ Invalid code. Try again.")
+        return UPLOAD_WAIT_CODE
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+        await client.disconnect()
+        return ConversationHandler.END
+
+# Password
+async def upload_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password = update.message.text.strip()
+    client = context.user_data.get("login_client")
+    if not client:
+        await update.message.reply_text("❌ Session lost. Start over.")
+        return ConversationHandler.END
+
+    try:
+        await client.sign_in(password=password)
+        session_string = await client.export_session_string()
+        uid = update.effective_user.id
+        session_path(uid).write_text(session_string, encoding="utf-8")
+        await client.disconnect()
+        context.user_data.pop("login_client", None)
+        context.user_data.pop("login_phone", None)
+        slot = context.user_data.get("upload_slot")
+        if slot is None:
+            await update.message.reply_text("❌ No pending upload.")
+            return ConversationHandler.END
+        ok, detail = await start_script(uid, slot)
+        if ok:
+            await update.message.reply_text(
+                f"🚀 <b>Login successful! Script hosted.</b>",
+                parse_mode=ParseMode.HTML,
+            )
+        else:
+            await update.message.reply_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
+        return ConversationHandler.END
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Wait {e.seconds}s.")
+        return UPLOAD_WAIT_PASSWORD
+    except errors.PasswordHashInvalidError:
+        await update.message.reply_text("❌ Invalid password. Try again.")
+        return UPLOAD_WAIT_PASSWORD
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+        await client.disconnect()
+        return ConversationHandler.END
 
 async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    client = context.user_data.pop("login_client", None)
+    if client:
+        await client.disconnect()
     await update.effective_message.reply_text("🚫 Upload cancelled.")
     return ConversationHandler.END
 
+# Standalone /login command (optional)
+async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if TelegramClient is None:
+        await update.message.reply_text("❌ Telethon not installed.")
+        return ConversationHandler.END
+    uid = update.effective_user.id
+    api = get_api(uid)
+    if not api.get("api_id") or not api.get("api_hash"):
+        await update.message.reply_text("❌ Set API via /setapi first.")
+        return ConversationHandler.END
+    await update.message.reply_text("📱 Send your phone number (+1234567890)")
+    return LOGIN_PHONE
+
+LOGIN_PHONE, LOGIN_CODE, LOGIN_PASSWORD = 10, 11, 12
+
+async def login_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    phone = update.message.text.strip()
+    if not phone.startswith("+") or not phone[1:].isdigit():
+        await update.message.reply_text("❌ Invalid phone.")
+        return LOGIN_PHONE
+    uid = update.effective_user.id
+    api = get_api(uid)
+    client = TelegramClient(str(user_dir(uid) / "temp_login"), api["api_id"], api["api_hash"])
+    await client.connect()
+    try:
+        await client.send_code_request(phone)
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+        await client.disconnect()
+        return ConversationHandler.END
+    context.user_data["login_client"] = client
+    context.user_data["login_phone"] = phone
+    await update.message.reply_text("📲 Send OTP code:")
+    return LOGIN_CODE
+
+async def login_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip()
+    client = context.user_data.get("login_client")
+    phone = context.user_data.get("login_phone")
+    if not client or not phone:
+        await update.message.reply_text("Session lost. Start /login again.")
+        return ConversationHandler.END
+    try:
+        await client.sign_in(phone=phone, code=code)
+    except errors.SessionPasswordNeededError:
+        await update.message.reply_text("🔐 Send 2FA password:")
+        return LOGIN_PASSWORD
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+        return LOGIN_CODE
+    # success
+    session_string = await client.export_session_string()
+    uid = update.effective_user.id
+    session_path(uid).write_text(session_string, encoding="utf-8")
+    await client.disconnect()
+    context.user_data.pop("login_client", None)
+    context.user_data.pop("login_phone", None)
+    await update.message.reply_text("✅ Login successful!")
+    return ConversationHandler.END
+
+async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password = update.message.text.strip()
+    client = context.user_data.get("login_client")
+    if not client:
+        await update.message.reply_text("Session lost.")
+        return ConversationHandler.END
+    try:
+        await client.sign_in(password=password)
+    except Exception as e:
+        await update.message.reply_text(f"❌ {e}")
+        return LOGIN_PASSWORD
+    session_string = await client.export_session_string()
+    uid = update.effective_user.id
+    session_path(uid).write_text(session_string, encoding="utf-8")
+    await client.disconnect()
+    context.user_data.pop("login_client", None)
+    context.user_data.pop("login_phone", None)
+    await update.message.reply_text("✅ Login successful!")
+    return ConversationHandler.END
+
+async def login_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    client = context.user_data.pop("login_client", None)
+    if client:
+        await client.disconnect()
+    await update.message.reply_text("Cancelled.")
+    return ConversationHandler.END
+
+async def logout_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    sp = session_path(uid)
+    if sp.exists():
+        sp.unlink()
+        await update.message.reply_text("✅ Session cleared.")
+    else:
+        await update.message.reply_text("ℹ️ No session stored.")
+
+# ---------------------------------------------------------------------------
+# OTHER COMMANDS (status, restart, logout, etc.)
+# ---------------------------------------------------------------------------
 async def setapi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "🔐 <b>Per-user API profile</b>\n\n"
-        "Usage: <code>/setapi API_ID API_HASH</code>\n\n"
-        "Your profile is stored under your own user directory.",
-        parse_mode=ParseMode.HTML,
-    )
     if len(context.args) >= 2:
         try:
             api_id = int(context.args[0])
@@ -1277,15 +1379,17 @@ async def setapi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             if api_id <= 0 or not re.fullmatch(r"[A-Za-z0-9]{16,128}", api_hash):
                 raise ValueError
             save_api(update.effective_user.id, api_id, api_hash)
-            await update.message.reply_text("✅ API profile saved.", parse_mode=ParseMode.HTML)
+            await update.message.reply_text("✅ API profile saved.")
         except Exception:
-            await update.message.reply_text("❌ Invalid API ID/API hash format.")
+            await update.message.reply_text("❌ Invalid format. Use /setapi API_ID API_HASH")
+    else:
+        await update.message.reply_text("Usage: /setapi API_ID API_HASH")
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     items = get_scripts(uid)
     if not items:
-        await update.message.reply_text("📭 <b>No scripts uploaded yet.</b>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("📭 No scripts.")
         return
     lines = [compact_script_line(uid, x) for x in items]
     await update.message.reply_text(
@@ -1298,113 +1402,58 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     items = get_scripts(update.effective_user.id)
     if not items:
-        await update.message.reply_text("📭 No scripts to restart.")
+        await update.message.reply_text("📭 No scripts.")
         return
-    await update.message.reply_text(f"{TOP}\n│ ✦ <b>RESTART CENTER</b> ✦ │\n{BOT}\n\nSelect a hosted script:", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "restart"))
+    await update.message.reply_text(
+        "🔄 Select script to restart:",
+        reply_markup=script_keyboard(items, "restart"),
+    )
 
 async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     items = get_scripts(update.effective_user.id)
     if not items:
-        await update.message.reply_text("📭 Nothing to logout/delete.")
+        await update.message.reply_text("📭 No scripts.")
         return
-    await update.message.reply_text(f"{TOP}\n│ ✦ <b>LOGOUT CENTER</b> ✦ │\n{BOT}\n\nStop and permanently remove a script:", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "logout"))
+    await update.message.reply_text(
+        "🚪 Select script to remove:",
+        reply_markup=script_keyboard(items, "logout"),
+    )
 
-# ---------------------------------------------------------------------------
-# CALLBACKS
-# ---------------------------------------------------------------------------
-
-async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    q = update.callback_query
-    await q.answer("✨ Opening…")
+async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
-    data = q.data or ""
-
-    if data == "close":
-        await q.message.edit_text("✅ Closed.")
+    args = context.args
+    if not args or not args[0].isdigit():
+        await update.message.reply_text("Usage: /logs <slot_number>")
         return
-    if data == "upload":
-        await q.message.reply_text(f"{TOP}\n│ ✦ <b>UPLOAD CENTER</b> ✦ │\n{BOT}\n\n📤 Use <code>/host</code> and send your <code>.py</code> file.", parse_mode=ParseMode.HTML)
+    slot = int(args[0]) - 1
+    item = find_script(uid, slot)
+    if not item:
+        await update.message.reply_text("❌ Script not found.")
         return
-    if data == "status":
-        items = get_scripts(uid)
-        if not items:
-            await q.message.reply_text("📭 No scripts uploaded yet.")
-            return
-        lines = []
-        for x in items:
-            slot = int(x.get("slot", 0))
-            p = PROCS.get((uid, slot))
-            alive = bool(p and p.returncode is None)
-            icon = "🟢" if alive else "🔴"
-            started = START_TIMES.get((uid, slot))
-            uptime = "—"
-            if alive and started:
-                uptime = f"{int(time.time()-started)}s"
-            lines.append(f"{icon} <b>#{slot+1}</b> {x.get('name','main.py')} • uptime {mono(uptime)}")
-        await q.message.reply_text(
-            f"📊 <b>YOUR HOSTED SCRIPTS</b>\n\n" + "\n".join(lines),
-            parse_mode=ParseMode.HTML,
-        )
+    lp = log_file(uid, slot)
+    if not lp.exists():
+        await update.message.reply_text("📭 No log yet.")
         return
-    if data == "restart_menu":
-        items = get_scripts(uid)
-        await q.message.reply_text("🔄 <b>Select a script to restart:</b>", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "restart"))
-        return
-    if data == "logout_menu":
-        items = get_scripts(uid)
-        if not items:
-            await q.message.reply_text("📭 Nothing to logout/delete.")
-            return
-        await q.message.reply_text("🚪 <b>Select the hosted script to stop & remove:</b>", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "logout"))
-        return
-    if data.startswith("host:"):
-        slot = int(data.split(":", 1)[1])
-        msg = await q.message.reply_text("🚀 <b>Preparing host...</b>", parse_mode=ParseMode.HTML)
-        await animate(msg, ["🚀 Preparing `▱▱▱`", "📦 Launching `▰▱▱`", "⚡ Checking `▰▰▰`"])
-        ok, detail = await start_script(uid, slot)
-        if ok:
-            await msg.edit_text(f"✅ <b>Hosted successfully</b>\n\nScript <b>#{slot+1}</b> is running.", parse_mode=ParseMode.HTML)
-        else:
-            await msg.edit_text(f"❌ <b>Host failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
-        return
-    if data.startswith("restart:"):
-        slot = int(data.split(":", 1)[1])
-        msg = await q.message.reply_text("🔄 Restarting...", parse_mode=ParseMode.HTML)
-        ok, detail = await restart_script(uid, slot)
-        await msg.edit_text("✅ <b>Restarted</b>" if ok else f"❌ <b>Restart failed</b>\n\n{detail}", parse_mode=ParseMode.HTML)
-        return
-    if data.startswith("delete:") or data.startswith("logout:"):
-        slot = int(data.split(":", 1)[1])
-        await stop_script(uid, slot)
-        remove_script(uid, slot)
-        shutil.rmtree(script_root(uid, slot), ignore_errors=True)
-        await q.message.edit_text(f"🚪 <b>Script #{slot+1} removed.</b>", parse_mode=ParseMode.HTML)
-        return
-    # NEW: handle login callback from upload flow
-    if data.startswith("login:"):
-        slot = int(data.split(":", 1)[1])
-        # Start login conversation from a callback is tricky; we'll forward to command.
-        await q.message.reply_text("Please use /login to set up your Telegram session.")
-        return
-
-# ---------------------------------------------------------------------------
-# EXTRA USER FUNCTIONS
-# ---------------------------------------------------------------------------
+    data = lp.read_text(encoding="utf-8", errors="replace")
+    tail = data[-3500:]
+    await update.message.reply_text(
+        f"📜 <b>LOGS — #{slot+1}</b>\n\n<pre>{esc(tail)}</pre>",
+        parse_mode=ParseMode.HTML,
+    )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    uid = update.effective_user.id
     await update.message.reply_text(
         f"{TOP}\n│ ✦ <b>HOSTER HELP</b> ✦ │\n{BOT}\n\n"
-        f"📤 <code>/host</code> — upload a Python script\n"
-        f"📊 <code>/status</code> — detailed live status\n"
+        f"📤 <code>/host</code> — upload & auto‑host\n"
+        f"📊 <code>/status</code> — view scripts\n"
         f"🔄 <code>/restart</code> — restart a script\n"
-        f"🚪 <code>/logout</code> — stop/remove a script\n"
-        f"🎁 <code>/referral</code> — referral reward\n"
+        f"🚪 <code>/logout</code> — remove script\n"
+        f"🎁 <code>/referral</code> — referral rewards\n"
         f"👑 <code>/premium</code> — plan details\n"
-        f"🔐 <code>/setapi API_ID API_HASH</code> — save your API profile\n"
-        f"🔐 <code>/login</code> — set up Telegram session (OTP + 2FA)\n"
-        f"🚫 <code>/logout_session</code> — clear stored session\n\n"
-        f"Your upload is executed as a separate process with its own working directory.",
+        f"🔐 <code>/setapi</code> — save API credentials\n"
+        f"🔐 <code>/login</code> — manual login\n"
+        f"🚫 <code>/logout_session</code> — clear session\n"
+        f"📜 <code>/logs &lt;slot#&gt;</code> — view log",
         parse_mode=ParseMode.HTML,
     )
 
@@ -1412,105 +1461,124 @@ async def api_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     uid = update.effective_user.id
     api = get_api(uid)
     if not api:
-        await update.message.reply_text("🔐 <b>API profile:</b> Not configured.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text("🔐 API profile: not configured.")
         return
     masked = esc(api["api_hash"][:4] + "••••••••" + api["api_hash"][-4:])
     await update.message.reply_text(
-        f"🔐 <b>YOUR API PROFILE</b>\n\n"
-        f"🆔 API ID: <code>{api['api_id']}</code>\n"
-        f"🔑 API Hash: <code>{masked}</code>\n"
-        f"✅ Stored privately for your account.",
+        f"🔐 <b>API PROFILE</b>\n\n"
+        f"🆔 ID: <code>{api['api_id']}</code>\n"
+        f"🔑 Hash: <code>{masked}</code>",
         parse_mode=ParseMode.HTML,
     )
 
-async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+# ---------------------------------------------------------------------------
+# CALLBACKS
+# ---------------------------------------------------------------------------
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    q = update.callback_query
+    await q.answer()
     uid = update.effective_user.id
-    items = get_scripts(uid)
-    if not items:
-        await update.message.reply_text("📭 No scripts.")
+    data = q.data or ""
+
+    if data == "close":
+        await q.message.edit_text("✅ Closed.")
         return
-    slot = None
-    if context.args and context.args[0].isdigit():
-        slot = int(context.args[0])
-    if slot is None:
-        await update.message.reply_text("Usage: <code>/logs 1</code>", parse_mode=ParseMode.HTML)
+    if data == "upload":
+        await q.message.reply_text("Use /host to upload.")
         return
-    item = find_script(uid, slot - 1)
-    if not item:
-        await update.message.reply_text("❌ Script not found.")
+    if data == "status":
+        items = get_scripts(uid)
+        if not items:
+            await q.message.reply_text("📭 No scripts.")
+            return
+        lines = []
+        for x in items:
+            slot = int(x.get("slot", 0))
+            alive, runtime = process_status(uid, slot)
+            icon = "🟢" if alive else "🔴"
+            lines.append(f"{icon} #{slot+1} {x.get('name','main.py')} • {runtime}")
+        await q.message.reply_text("📊 STATUS\n" + "\n".join(lines), parse_mode=ParseMode.HTML)
         return
-    lp = log_file(uid, slot - 1)
-    if not lp.exists():
-        await update.message.reply_text("📭 No runtime log yet.")
+    if data == "restart_menu":
+        items = get_scripts(uid)
+        await q.message.reply_text("🔄 Select:", reply_markup=script_keyboard(items, "restart"))
         return
-    data = lp.read_text(encoding="utf-8", errors="replace")
-    tail = data[-3500:]
-    await update.message.reply_text(
-        f"📜 <b>LOGS — #{slot}</b>\n\n<pre>{esc(tail)}</pre>",
-        parse_mode=ParseMode.HTML,
-    )
+    if data == "logout_menu":
+        items = get_scripts(uid)
+        if not items:
+            await q.message.reply_text("📭 No scripts.")
+            return
+        await q.message.reply_text("🚪 Select:", reply_markup=script_keyboard(items, "logout"))
+        return
+    if data.startswith("host:"):
+        slot = int(data.split(":", 1)[1])
+        msg = await q.message.reply_text("🚀 Hosting...")
+        ok, detail = await start_script(uid, slot)
+        await msg.edit_text("✅ Hosted" if ok else f"❌ {detail}")
+        return
+    if data.startswith("restart:"):
+        slot = int(data.split(":", 1)[1])
+        ok, detail = await restart_script(uid, slot)
+        await q.message.edit_text("✅ Restarted" if ok else f"❌ {detail}")
+        return
+    if data.startswith("logout:") or data.startswith("delete:"):
+        slot = int(data.split(":", 1)[1])
+        await stop_script(uid, slot)
+        remove_script(uid, slot)
+        shutil.rmtree(script_root(uid, slot), ignore_errors=True)
+        await q.message.edit_text(f"🚪 Script #{slot+1} removed.")
+        return
+    if data.startswith("logs:"):
+        slot = int(data.split(":", 1)[1])
+        lp = log_file(uid, slot)
+        if not lp.exists():
+            await q.message.reply_text("📭 No log.")
+            return
+        tail = lp.read_text(encoding="utf-8", errors="replace")[-3500:]
+        await q.message.reply_text(f"📜 LOGS\n\n<pre>{esc(tail)}</pre>", parse_mode=ParseMode.HTML)
+        return
+    if data.startswith("login:"):
+        await q.message.reply_text("Please use /login manually.")
 
 # ---------------------------------------------------------------------------
-# ADMIN
+# ADMIN COMMANDS (unchanged)
 # ---------------------------------------------------------------------------
-
 async def setwelcomevideo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     reply = update.message.reply_to_message
-    if not reply or not reply.video:
-        await update.message.reply_text("Reply to a video with /setwelcomevideo")
-        return
-    JSONStore.save(WELCOME_FILE, {"file_id": reply.video.file_id})
-    await update.message.reply_text("✅ Welcome video saved.")
+    if reply and reply.video:
+        JSONStore.save(WELCOME_FILE, {"file_id": reply.video.file_id})
+        await update.message.reply_text("✅ Welcome video set.")
+    else:
+        await update.message.reply_text("Reply to a video.")
 
 async def remove_welcomevideo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update.effective_user.id):
-        return
-    try:
-        WELCOME_FILE.unlink()
-    except FileNotFoundError:
-        pass
-    await update.message.reply_text("✅ Welcome video removed.")
+    if not is_admin(update.effective_user.id): return
+    try: WELCOME_FILE.unlink()
+    except: pass
+    await update.message.reply_text("✅ Removed.")
 
 async def admin_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update.effective_user.id):
-        return
-    if not context.args:
-        await update.message.reply_text("Usage: /premium_user <uid>")
-        return
+    if not is_admin(update.effective_user.id): return
     try:
         uid = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Invalid user id.")
-        return
-    save_meta(uid, {"premium": True, "premium_reason": "admin", "premium_at": int(time.time())})
-    await update.message.reply_text(f"✅ Premium enabled for {uid}.")
+        save_meta(uid, {"premium": True, "premium_reason": "admin", "premium_at": int(time.time())})
+        await update.message.reply_text(f"✅ Premium enabled for {uid}.")
+    except: await update.message.reply_text("Usage: /premium_user <uid>")
 
 async def admin_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update.effective_user.id):
-        return
-    if not context.args:
-        await update.message.reply_text("Usage: /revoke_premium <uid>")
-        return
+    if not is_admin(update.effective_user.id): return
     try:
         uid = int(context.args[0])
-    except ValueError:
-        await update.message.reply_text("Invalid user id.")
-        return
-    meta = get_meta(uid)
-    meta["premium"] = False
-    meta["premium_reason"] = "revoked"
-    save_meta(uid, meta)
-    await update.message.reply_text(f"✅ Premium revoked for {uid}.")
+        meta = get_meta(uid)
+        meta["premium"] = False
+        save_meta(uid, meta)
+        await update.message.reply_text(f"✅ Premium revoked for {uid}.")
+    except: await update.message.reply_text("Usage: /revoke_premium <uid>")
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update.effective_user.id):
-        return
-    text = " ".join(context.args).strip()
-    if not text and update.message.reply_to_message:
-        await update.message.reply_text("For media broadcast, reply handling can be added separately. Text broadcast currently active.")
-        return
+    if not is_admin(update.effective_user.id): return
+    text = " ".join(context.args)
     if not text:
         await update.message.reply_text("Usage: /broadcast <message>")
         return
@@ -1520,60 +1588,63 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await context.bot.send_message(uid, text)
             sent += 1
             await asyncio.sleep(0.05)
-        except Exception:
-            continue
-    await update.message.reply_text(f"✅ Broadcast sent to {sent} users.")
+        except: pass
+    await update.message.reply_text(f"✅ Broadcast to {sent} users.")
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    if not is_admin(update.effective_user.id):
-        return
+    if not is_admin(update.effective_user.id): return
     users = all_user_ids()
     scripts = sum(len(get_scripts(uid)) for uid in users)
     prem = sum(1 for uid in users if is_premium(uid))
     await update.message.reply_text(
-        f"📊 <b>HOSTER STATS</b>\n\nUsers: <b>{len(users)}</b>\nScripts: <b>{scripts}</b>\nPremium: <b>{prem}</b>\nRunning: <b>{running_count()}</b>",
+        f"📊 STATS\n\nUsers: {len(users)}\nScripts: {scripts}\nPremium: {prem}\nRunning: {running_count()}",
         parse_mode=ParseMode.HTML,
     )
 
 # ---------------------------------------------------------------------------
 # MAIN
 # ---------------------------------------------------------------------------
-
 async def post_init(app: Application) -> None:
     app.create_task(health_loop(app))
     await app.bot.set_my_commands([
         ("start", "Open hoster"),
-        ("host", "Upload your userbot script"),
-        ("status", "View hosted scripts"),
-        ("restart", "Restart a script"),
-        ("logout", "Stop and remove a script"),
-        ("referral", "Refer & earn Premium"),
-        ("premium", "Premium information"),
-        ("setapi", "Set your API profile"),
-        ("login", "Set up Telegram session (OTP)"),
-        ("logout_session", "Clear stored session"),
+        ("host", "Upload & auto-host script"),
+        ("status", "View scripts"),
+        ("restart", "Restart script"),
+        ("logout", "Remove script"),
+        ("referral", "Refer & earn premium"),
+        ("premium", "Plan details"),
+        ("setapi", "Set API credentials"),
+        ("login", "Manual login"),
+        ("logout_session", "Clear session"),
+        ("logs", "View logs"),
+        ("help", "Help"),
     ])
 
 def build_app() -> Application:
     if not BOT_TOKEN:
-        raise RuntimeError("BOT_TOKEN is not configured")
+        raise RuntimeError("BOT_TOKEN not set")
     if not OWNER_ID:
-        raise RuntimeError("OWNER_ID is not configured")
+        raise RuntimeError("OWNER_ID not set")
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
-    # Upload conversation
+    # Upload conversation (integrated login)
     upload_conv = ConversationHandler(
         entry_points=[CommandHandler("host", begin_upload)],
         states={
-            1: [MessageHandler(filters.Document.ALL, receive_script)],
-            2: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_api_id)],
-            3: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_api_hash)],
+            UPLOAD_WAIT_FILE: [MessageHandler(filters.Document.ALL, receive_script)],
+            UPLOAD_WAIT_API_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_api_id)],
+            UPLOAD_WAIT_API_HASH: [MessageHandler(filters.TEXT & ~filters.COMMAND, receive_api_hash)],
+            UPLOAD_WAIT_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_phone)],
+            UPLOAD_WAIT_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_code)],
+            UPLOAD_WAIT_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, upload_password)],
         },
         fallbacks=[CommandHandler("cancel", cancel_upload)],
         allow_reentry=True,
     )
-    # NEW: Login conversation
+
+    # Standalone login conversation
     login_conv = ConversationHandler(
         entry_points=[CommandHandler("login", login_start)],
         states={
@@ -1596,8 +1667,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("restart", restart_command))
     app.add_handler(CommandHandler("logout", logout_command))
     app.add_handler(upload_conv)
-    app.add_handler(login_conv)   # NEW
-    app.add_handler(CommandHandler("logout_session", logout_session))  # NEW
+    app.add_handler(login_conv)
+    app.add_handler(CommandHandler("logout_session", logout_session))
     app.add_handler(CommandHandler("setwelcomevideo", setwelcomevideo))
     app.add_handler(CommandHandler("removewelcomevideo", remove_welcomevideo))
     app.add_handler(CommandHandler("premium_user", admin_premium))
@@ -1609,7 +1680,7 @@ def build_app() -> Application:
 
 def main() -> None:
     app = build_app()
-    log.info("SID Manual Userbot Hoster V11 started")
+    log.info("SID Manual Userbot Hoster V12 started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
