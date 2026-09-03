@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-SID MANUAL USERBOT HOSTER V10
+SID MANUAL USERBOT HOSTER V11 – with full Telegram login flow
 
 A Telegram bot that hosts USER-PROVIDED Python userbot scripts.
-The hoster does not generate a userbot and does not replace uploaded code.
-Authentication stays inside the uploaded user script.
+This version adds a login flow (phone, OTP, 2FA) to create a session string
+that is injected into the userbot environment, so the script can run
+without re‑asking for credentials.
 
 Railway environment variables:
   BOT_TOKEN                required
@@ -20,8 +21,7 @@ Security notes:
   - Uploaded scripts run as subprocesses with a sanitized environment.
   - The bot token is never passed into uploaded scripts.
   - API_ID/API_HASH are injected only when a per-user profile exists.
-  - OTP/2FA passwords are NOT collected by this hoster. The uploaded script
-    remains responsible for its own Telegram authentication.
+  - Session string is stored per user and injected into the script.
   - For real multi-tenant production use, isolate each script in a container
     or separate Railway service. A subprocess is not a security sandbox.
 """
@@ -58,11 +58,18 @@ from telegram.ext import (
     filters,
 )
 
+# NEW: optional Telethon for login
+try:
+    from telethon import TelegramClient, errors
+except ImportError:
+    TelegramClient = None
+    log.warning("Telethon not installed. Login features will be disabled.")
+
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_RUNNING = max(1, int(os.getenv("MAX_RUNNING", "50") or 50))
 FREE_SCRIPT_LIMIT = max(1, int(os.getenv("FREE_SCRIPT_LIMIT", "3") or 3))
@@ -112,45 +119,40 @@ def esc(t: str) -> str:
     return html.escape(str(t), quote=False)
 
 def premium_button(text: str, emoji: str, callback: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(f"{emoji}  {text}  ✦", callback_data=callback)
+    return InlineKeyboardButton(f"{emoji}  {text}  ✦", callback_data=callback)
 
 def progress_bar(value: int, total: int, width: int = 10) -> str:
     total = max(1, total)
     filled = max(0, min(width, int((value / total) * width)))
     return "█" * filled + "░" * (width - filled)
 
-
 def bold(t: str) -> str:
     return f"<b>{t}</b>"
 
-
 def mono(t: str) -> str:
     return f"<code>{t}</code>"
-
 
 def user_dir(uid: int) -> Path:
     p = USERS / str(uid)
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-
 def scripts_dir(uid: int) -> Path:
     p = user_dir(uid) / "scripts"
     p.mkdir(parents=True, exist_ok=True)
     return p
 
-
 def meta_path(uid: int) -> Path:
     return user_dir(uid) / "meta.json"
-
 
 def api_path(uid: int) -> Path:
     return user_dir(uid) / "api.json"
 
-
 def scripts_path(uid: int) -> Path:
     return user_dir(uid) / "scripts.json"
 
+def session_path(uid: int) -> Path:      # NEW
+    return user_dir(uid) / "session.string"
 
 class JSONStore:
     _lock = asyncio.Lock()
@@ -171,7 +173,6 @@ class JSONStore:
             json.dump(data, f, ensure_ascii=False, indent=2)
         tmp.replace(path)
 
-
 # ---------------------------------------------------------------------------
 # USER / REFERRAL / PREMIUM DATA
 # ---------------------------------------------------------------------------
@@ -179,17 +180,14 @@ class JSONStore:
 def get_meta(uid: int) -> dict:
     return JSONStore.load(meta_path(uid), {})
 
-
 def save_meta(uid: int, data: dict) -> dict:
     meta = get_meta(uid)
     meta.update(data)
     JSONStore.save(meta_path(uid), meta)
     return meta
 
-
 def get_api(uid: int) -> dict:
     return JSONStore.load(api_path(uid), {})
-
 
 def save_api(uid: int, api_id: int, api_hash: str) -> None:
     JSONStore.save(api_path(uid), {
@@ -198,14 +196,11 @@ def save_api(uid: int, api_id: int, api_hash: str) -> None:
         "updated_at": int(time.time()),
     })
 
-
 def get_scripts(uid: int) -> list:
     return JSONStore.load(scripts_path(uid), [])
 
-
 def save_scripts(uid: int, items: list) -> None:
     JSONStore.save(scripts_path(uid), items)
-
 
 def find_script(uid: int, slot: int) -> Optional[dict]:
     for item in get_scripts(uid):
@@ -213,17 +208,14 @@ def find_script(uid: int, slot: int) -> Optional[dict]:
             return item
     return None
 
-
 def replace_script(uid: int, entry: dict) -> None:
     items = [x for x in get_scripts(uid) if int(x.get("slot", -1)) != int(entry["slot"])]
     items.append(entry)
     items.sort(key=lambda x: int(x.get("slot", 0)))
     save_scripts(uid, items)
 
-
 def remove_script(uid: int, slot: int) -> None:
     save_scripts(uid, [x for x in get_scripts(uid) if int(x.get("slot", -1)) != int(slot)])
-
 
 def all_user_ids() -> List[int]:
     out = []
@@ -232,24 +224,19 @@ def all_user_ids() -> List[int]:
             out.append(int(p.name))
     return out
 
-
 def is_admin(uid: int) -> bool:
     return uid == OWNER_ID or uid in EXTRA_ADMINS
-
 
 def is_premium(uid: int) -> bool:
     meta = get_meta(uid)
     return bool(meta.get("premium") or is_admin(uid))
 
-
 def limit_for(uid: int) -> int:
     return PREMIUM_SCRIPT_LIMIT if is_premium(uid) else FREE_SCRIPT_LIMIT
-
 
 def referral_link(context: ContextTypes.DEFAULT_TYPE, uid: int) -> str:
     username = context.bot.username or "SIDHosterBot"
     return f"https://t.me/{username}?start=ref_{uid}"
-
 
 def register_user(uid: int, name: str, referrer: Optional[int] = None) -> dict:
     meta = get_meta(uid)
@@ -269,7 +256,6 @@ def register_user(uid: int, name: str, referrer: Optional[int] = None) -> dict:
             meta["first_name"] = name
             save_meta(uid, meta)
 
-    # Reward only once and only for a newly-created account.
     if referrer and referrer != uid and meta.get("referrer") == int(referrer):
         ref_meta = get_meta(int(referrer))
         refs = list(ref_meta.get("referrals") or [])
@@ -294,7 +280,6 @@ LOG_HANDLES: Dict[Tuple[int, int], Any] = {}
 PROC_LOCK = asyncio.Lock()
 SCRIPT_LOCKS: Dict[Tuple[int, int], asyncio.Lock] = {}
 
-
 def get_script_lock(uid: int, slot: int) -> asyncio.Lock:
     key = (uid, slot)
     lock = SCRIPT_LOCKS.get(key)
@@ -302,7 +287,6 @@ def get_script_lock(uid: int, slot: int) -> asyncio.Lock:
         lock = asyncio.Lock()
         SCRIPT_LOCKS[key] = lock
     return lock
-
 
 def running_count() -> int:
     dead = []
@@ -314,24 +298,19 @@ def running_count() -> int:
         START_TIMES.pop(key, None)
     return len(PROCS)
 
-
 def script_root(uid: int, slot: int) -> Path:
     return scripts_dir(uid) / f"slot_{slot}"
-
 
 def script_file(uid: int, slot: int) -> Path:
     item = find_script(uid, slot) or {}
     entry = item.get("entrypoint") or "main.py"
     return script_root(uid, slot) / entry
 
-
 def requirements_file(uid: int, slot: int) -> Path:
     return script_root(uid, slot) / "requirements.txt"
 
-
 def venv_dir(uid: int, slot: int) -> Path:
     return script_root(uid, slot) / ".venv"
-
 
 def venv_python(uid: int, slot: int) -> Path:
     root = venv_dir(uid, slot)
@@ -339,12 +318,10 @@ def venv_python(uid: int, slot: int) -> Path:
         return root / "Scripts" / "python.exe"
     return root / "bin" / "python"
 
-
 def log_file(uid: int, slot: int) -> Path:
     root = script_root(uid, slot)
     root.mkdir(parents=True, exist_ok=True)
     return root / "runtime.log"
-
 
 def read_log_tail(uid: int, slot: int, lines: int = 30) -> str:
     path = log_file(uid, slot)
@@ -354,9 +331,7 @@ def read_log_tail(uid: int, slot: int, lines: int = 30) -> str:
     except Exception as exc:
         return f"(unable to read log: {exc})"
 
-
 def _preexec_limits() -> None:
-    # Linux/Railway best-effort limits. Containers/service limits remain the real guardrail.
     try:
         os.setsid()
     except Exception:
@@ -370,7 +345,6 @@ def _preexec_limits() -> None:
             resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
     except Exception:
         pass
-
 
 async def install_requirements(uid: int, slot: int) -> Tuple[bool, str]:
     req = requirements_file(uid, slot)
@@ -405,7 +379,6 @@ async def install_requirements(uid: int, slot: int) -> Tuple[bool, str]:
         return False, f"Dependency installation failed:\n{text}"
     return True, "Dependencies installed."
 
-
 async def dependency_check(uid: int, slot: int) -> Tuple[bool, str]:
     item = find_script(uid, slot) or {}
     imports = item.get("imports") or []
@@ -414,7 +387,6 @@ async def dependency_check(uid: int, slot: int) -> Tuple[bool, str]:
     for name in imports:
         if name in {"__future__"}:
             continue
-        # Standard library detection using the host Python is enough for builtins.
         if importlib.util.find_spec(name) is not None:
             continue
         if py != Path(sys.executable):
@@ -432,7 +404,6 @@ async def dependency_check(uid: int, slot: int) -> Tuple[bool, str]:
     if missing:
         return False, "Missing imports: " + ", ".join(sorted(set(missing))[:25])
     return True, "Imports OK"
-
 
 async def stop_script(uid: int, slot: int) -> bool:
     key = (uid, slot)
@@ -472,7 +443,6 @@ async def stop_script(uid: int, slot: int) -> bool:
         except Exception: pass
     return True
 
-
 async def prepare_runtime(uid: int, slot: int) -> Tuple[bool, str]:
     ok, msg = await install_requirements(uid, slot)
     if not ok:
@@ -481,7 +451,6 @@ async def prepare_runtime(uid: int, slot: int) -> Tuple[bool, str]:
     if not ok:
         return False, msg + ". Add/fix requirements.txt and restart."
     return True, "Runtime ready"
-
 
 async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
     lock = get_script_lock(uid, slot)
@@ -531,6 +500,18 @@ async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
                 "TELEGRAM_API_HASH": str(api["api_hash"]),
             })
 
+        # NEW: inject session string if available
+        session_path_user = session_path(uid)
+        if session_path_user.exists():
+            try:
+                session_string = session_path_user.read_text(encoding="utf-8").strip()
+                if session_string:
+                    env["SESSION_STRING"] = session_string
+                    env["TELEGRAM_SESSION_STRING"] = session_string
+                    log.info("Injected session for user %d", uid)
+            except Exception as e:
+                log.warning("Failed to read session for %d: %s", uid, e)
+
         logfile = log_file(uid, slot)
         with logfile.open("a", encoding="utf-8") as lf:
             lf.write(f"\n\n===== START {time.strftime('%Y-%m-%d %H:%M:%S')} =====\n")
@@ -551,7 +532,6 @@ async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
             lf.close()
             return False, f"Launch failed: {str(exc)[:240]}"
 
-        # Real startup health check instead of only checking 350 ms.
         await asyncio.sleep(0.8)
         if proc.returncode is not None:
             try:
@@ -588,7 +568,6 @@ async def start_script(uid: int, slot: int) -> Tuple[bool, str]:
         replace_script(uid, {**item, "status": "running", "last_started": int(time.time()), "crash_count": 0, "last_error": ""})
         return True, "Running"
 
-
 async def restart_script(uid: int, slot: int) -> Tuple[bool, str]:
     item = find_script(uid, slot)
     if not item:
@@ -596,12 +575,10 @@ async def restart_script(uid: int, slot: int) -> Tuple[bool, str]:
     replace_script(uid, {**item, "crash_count": 0})
     return await start_script(uid, slot)
 
-
 async def stop_all_for_user(uid: int) -> None:
     for key in list(PROCS):
         if key[0] == uid:
             await stop_script(*key)
-
 
 async def health_loop(app: Application) -> None:
     while True:
@@ -638,7 +615,6 @@ DANGEROUS_PATTERNS = [
     (re.compile(r"os\.environ\.(get|__getitem__)\(\s*[\"'](BOT_TOKEN|OWNER_ID)[\"']", re.I), "Attempts to read hoster secrets"),
 ]
 
-
 def _literal_value(node: ast.AST):
     if isinstance(node, ast.Constant):
         return node.value
@@ -654,7 +630,6 @@ def _literal_value(node: ast.AST):
         except Exception:
             return None
     return None
-
 
 def detect_api(text: str, tree: Optional[ast.AST] = None) -> Tuple[Optional[int], Optional[str]]:
     aid: Optional[int] = None
@@ -687,7 +662,6 @@ def detect_api(text: str, tree: Optional[ast.AST] = None) -> Tuple[Optional[int]
                     if key in API_HASH_NAMES and ahash is None and isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9]{16,128}", value):
                         ahash = value
 
-    # Regex fallback for unusual formatting.
     if aid is None:
         m = API_ID_RE.search(text)
         if m:
@@ -697,7 +671,6 @@ def detect_api(text: str, tree: Optional[ast.AST] = None) -> Tuple[Optional[int]
         m = API_HASH_RE.search(text)
         if m: ahash = m.group(1)
     return aid, ahash
-
 
 def scan_script(path: Path) -> dict:
     raw = path.read_bytes()
@@ -737,7 +710,6 @@ def scan_script(path: Path) -> dict:
         "blocked": blocked,
     }
 
-
 def safe_extract_zip(zip_path: Path, target: Path) -> Tuple[bool, str]:
     try:
         with zipfile.ZipFile(zip_path) as zf:
@@ -760,7 +732,6 @@ def safe_extract_zip(zip_path: Path, target: Path) -> Tuple[bool, str]:
         return False, "Invalid ZIP archive."
     except Exception as exc:
         return False, f"ZIP extraction failed: {exc}"
-
 
 def find_entrypoint(root: Path) -> Optional[Path]:
     main = root / "main.py"
@@ -791,8 +762,8 @@ def script_limits_text(uid: int) -> str:
     refs = len(meta.get("referrals") or [])
     plan = "PREMIUM" if is_premium(uid) else "FREE"
     return (
-        f"👑 <b>{plan}</b>  •  "
-        f"📦 <b>{len(get_scripts(uid))}/{limit_for(uid)}</b>  •  "
+        f"👑 <b>{plan}</b>  •  "
+        f"📦 <b>{len(get_scripts(uid))}/{limit_for(uid)}</b>  •  "
         f"🎁 <b>{refs}/{REFERRAL_TARGET}</b>"
     )
 
@@ -801,7 +772,7 @@ def compact_script_line(uid: int, item: dict) -> str:
     name = esc(item.get("name") or f"Script #{slot+1}")
     alive, runtime = process_status(uid, slot)
     icon = "🟢" if alive else "🔴"
-    return f"{icon} <b>#{slot+1}</b> {name[:40]}  <code>{runtime}</code>"
+    return f"{icon} <b>#{slot+1}</b> {name[:40]}  <code>{runtime}</code>"
 
 async def typing_animation(message, frames: list[str], delay: float = 0.06):
     await animate(message, frames, delay)
@@ -818,14 +789,12 @@ async def animate(msg, frames: List[str], delay: float = 0.08) -> None:
             pass
         await asyncio.sleep(delay)
 
-
 def main_keyboard(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [premium_button("UPLOAD SCRIPT", "📤", "upload")],
         [premium_button("SEE STATUS", "📊", "status"), premium_button("RESTART", "🔄", "restart_menu")],
         [premium_button("LOGOUT", "🚪", "logout_menu")],
     ])
-
 
 def script_keyboard(items: list, action_prefix: str) -> InlineKeyboardMarkup:
     rows = []
@@ -835,7 +804,6 @@ def script_keyboard(items: list, action_prefix: str) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(f"#{slot + 1} • {title[:28]}", callback_data=f"{action_prefix}:{slot}")])
     rows.append([InlineKeyboardButton("❌ Close", callback_data="close")])
     return InlineKeyboardMarkup(rows)
-
 
 def dashboard_text(uid: int) -> str:
     meta = get_meta(uid)
@@ -850,19 +818,18 @@ def dashboard_text(uid: int) -> str:
     used = len(items)
     return (
         f"{TOP}\n"
-        f"│  ✦ <b>SID MANUAL HOSTER</b> ✦ │\n"
+        f"│  ✦ <b>SID MANUAL HOSTER</b> ✦ │\n"
         f"{BOT}\n\n"
         f"👋 <b>Welcome</b>, {esc(meta.get('first_name','User'))}\n"
         f"{SPARK}\n"
-        f"💎 <b>PLAN</b>      {plan}\n"
-        f"📦 <b>SCRIPTS</b>   {used}/{limit}   <code>{progress_bar(used, limit)}</code>\n"
-        f"🟢 <b>RUNNING</b>   {running}\n"
+        f"💎 <b>PLAN</b>      {plan}\n"
+        f"📦 <b>SCRIPTS</b>   {used}/{limit}   <code>{progress_bar(used, limit)}</code>\n"
+        f"🟢 <b>RUNNING</b>   {running}\n"
         f"🔐 <b>API PROFILE</b> {api_state}\n"
         f"🎁 <b>REFERRALS</b> {refs}/{REFERRAL_TARGET}\n"
         f"{DIV}\n"
         f"<i>Manual hosting • Your code stays yours • No source rewriting</i>"
     )
-
 
 # ---------------------------------------------------------------------------
 # COMMANDS
@@ -907,7 +874,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     ])
     await msg.edit_text(text, parse_mode=ParseMode.HTML, reply_markup=kb)
 
-
 async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     meta = get_meta(uid)
@@ -921,7 +887,6 @@ async def referral(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.HTML,
     )
 
-
 async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
     await update.message.reply_text(
@@ -932,6 +897,173 @@ async def premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.HTML,
     )
 
+# -- NEW: LOGIN CONVERSATION ------------------------------------------------
+
+LOGIN_PHONE, LOGIN_CODE, LOGIN_PASSWORD = range(10, 13)
+
+async def login_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Start the login process."""
+    if TelegramClient is None:
+        await update.message.reply_text(
+            "❌ Telethon is not installed. Please install it first."
+        )
+        return ConversationHandler.END
+
+    uid = update.effective_user.id
+    api = get_api(uid)
+    if not api.get("api_id") or not api.get("api_hash"):
+        await update.message.reply_text(
+            "❌ You must set your API ID and hash first using /setapi.\n"
+            "Example: /setapi 1234567 abcdefghijklmnopqrstuvwxyz"
+        )
+        return ConversationHandler.END
+
+    context.user_data["login_api"] = api
+    await update.message.reply_text(
+        "📱 <b>Telegram Login</b>\n\n"
+        "Send your phone number with country code (e.g., +1234567890).",
+        parse_mode=ParseMode.HTML,
+    )
+    return LOGIN_PHONE
+
+async def login_phone(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    phone = update.message.text.strip()
+    if not phone.startswith("+") or not phone[1:].isdigit():
+        await update.message.reply_text("❌ Invalid phone number. Use format: +1234567890")
+        return LOGIN_PHONE
+
+    uid = update.effective_user.id
+    api = context.user_data["login_api"]
+    client = TelegramClient(
+        session=str(user_dir(uid) / "temp_login"),   # temporary session
+        api_id=api["api_id"],
+        api_hash=api["api_hash"],
+    )
+    await client.connect()
+    try:
+        await client.send_code_request(phone)
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Too many attempts. Wait {e.seconds} seconds.")
+        await client.disconnect()
+        return ConversationHandler.END
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error sending code: {e}")
+        await client.disconnect()
+        return ConversationHandler.END
+
+    context.user_data["login_client"] = client
+    context.user_data["login_phone"] = phone
+    await update.message.reply_text(
+        "📲 <b>Code sent</b>\n\n"
+        "Send the OTP code you received via Telegram (or your app).",
+        parse_mode=ParseMode.HTML,
+    )
+    return LOGIN_CODE
+
+async def login_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    code = update.message.text.strip()
+    if not code.isdigit():
+        await update.message.reply_text("❌ Invalid code. Send only digits.")
+        return LOGIN_CODE
+
+    client = context.user_data.get("login_client")
+    phone = context.user_data.get("login_phone")
+    if not client or not phone:
+        await update.message.reply_text("❌ Session lost. Please start again with /login.")
+        return ConversationHandler.END
+
+    try:
+        await client.sign_in(phone=phone, code=code)
+        # Success: obtain session string
+        session_string = await client.export_session_string()
+        # Store session string
+        uid = update.effective_user.id
+        session_path_user = session_path(uid)
+        session_path_user.write_text(session_string, encoding="utf-8")
+        await client.disconnect()
+        context.user_data.pop("login_client", None)
+        context.user_data.pop("login_phone", None)
+        await update.message.reply_text(
+            f"✅ <b>Login successful</b>\n\n"
+            f"Session stored securely. Your scripts will now use this session.",
+            parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+    except errors.SessionPasswordNeededError:
+        await update.message.reply_text(
+            "🔐 <b>2FA required</b>\n\n"
+            "Send your two‑factor password.",
+            parse_mode=ParseMode.HTML,
+        )
+        return LOGIN_PASSWORD
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Too many attempts. Wait {e.seconds}s.")
+        await client.disconnect()
+        return ConversationHandler.END
+    except errors.PhoneCodeExpiredError:
+        await update.message.reply_text("❌ The code has expired. Start again with /login.")
+        await client.disconnect()
+        return ConversationHandler.END
+    except errors.PhoneCodeInvalidError:
+        await update.message.reply_text("❌ Invalid code. Try again.")
+        return LOGIN_CODE
+    except Exception as e:
+        await update.message.reply_text(f"❌ Login error: {e}")
+        await client.disconnect()
+        return ConversationHandler.END
+
+async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    password = update.message.text.strip()
+    client = context.user_data.get("login_client")
+    if not client:
+        await update.message.reply_text("❌ Session lost. Start again with /login.")
+        return ConversationHandler.END
+
+    try:
+        await client.sign_in(password=password)
+        session_string = await client.export_session_string()
+        uid = update.effective_user.id
+        session_path_user = session_path(uid)
+        session_path_user.write_text(session_string, encoding="utf-8")
+        await client.disconnect()
+        context.user_data.pop("login_client", None)
+        context.user_data.pop("login_phone", None)
+        await update.message.reply_text(
+            f"✅ <b>Login successful</b>\n\n"
+            f"Session stored securely.",
+            parse_mode=ParseMode.HTML,
+        )
+        return ConversationHandler.END
+    except errors.FloodWaitError as e:
+        await update.message.reply_text(f"⏳ Wait {e.seconds}s and try again.")
+        return LOGIN_PASSWORD
+    except errors.PasswordHashInvalidError:
+        await update.message.reply_text("❌ Invalid password. Try again.")
+        return LOGIN_PASSWORD
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {e}")
+        await client.disconnect()
+        return ConversationHandler.END
+
+async def login_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    client = context.user_data.pop("login_client", None)
+    if client:
+        await client.disconnect()
+    await update.message.reply_text("🚫 Login cancelled.")
+    return ConversationHandler.END
+
+async def logout_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    uid = update.effective_user.id
+    sp = session_path(uid)
+    if sp.exists():
+        sp.unlink()
+        await update.message.reply_text("✅ Session cleared. You will need to login again.")
+    else:
+        await update.message.reply_text("ℹ️ No session stored.")
+
+# ---------------------------------------------------------------------------
+# UPLOAD COMMANDS (unchanged except for a note about login)
+# ---------------------------------------------------------------------------
 
 async def begin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
@@ -945,11 +1077,10 @@ async def begin_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         f"📤 <b>UPLOAD USERBOT SCRIPT</b>\n\n"
         f"Send a <code>.py</code> file or a <code>.zip</code> with your script + requirements.txt.\n"
         f"I will syntax-check it and inspect API configuration.\n\n"
-        f"The hoster does not modify your userbot source.",
+        f"After upload, you can set up your Telegram session using /login.",
         parse_mode=ParseMode.HTML,
     )
     return 1
-
 
 async def _finish_ready_script(update, context, uid: int, slot: int, result: dict, display_name: str, api_state: str) -> int:
     item = find_script(uid, slot) or {}
@@ -968,12 +1099,12 @@ async def _finish_ready_script(update, context, uid: int, slot: int, result: dic
         f"🧩 Entrypoint: <code>{esc(item.get('entrypoint','main.py'))}</code>\n"
         f"📦 Dependencies: {'✅ requirements.txt found' if item.get('has_requirements') else 'ℹ️ none supplied'}\n\n"
         f"{api_state}{warn_text}\n\n"
-        f"Press <b>Host Now</b> to run the uploaded script unchanged.",
+        f"Press <b>Host Now</b> to run the uploaded script unchanged.\n"
+        f"To set up Telegram login, use /login.",
         parse_mode=ParseMode.HTML,
         reply_markup=kb,
     )
     return ConversationHandler.END
-
 
 async def receive_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     uid = update.effective_user.id
@@ -1078,7 +1209,6 @@ async def receive_script(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await msg.edit_text("✅ <b>Scan complete.</b> Preparing hosting controls…", parse_mode=ParseMode.HTML)
     return await _finish_ready_script(update, context, uid, slot, result, name, api_state)
 
-
 async def receive_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     raw = update.message.text.strip()
     if not raw.isdigit() or not (10000 <= int(raw) <= 999999999999):
@@ -1091,14 +1221,17 @@ async def receive_api_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         slot = context.user_data.get("pending_slot")
         context.user_data.pop("api_id_pending", None)
         await update.message.reply_text(
-            f"✅ <b>API ID saved.</b> Existing API hash reused.\n\nPress Host Now from the pending upload.",
+            f"✅ <b>API ID saved.</b> Existing API hash reused.\n\n"
+            f"You can now set up Telegram login with /login, or press Host Now.",
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup([[premium_button("Host Now", "🚀", f"host:{int(slot)}")]])
+            reply_markup=InlineKeyboardMarkup([
+                [premium_button("Host Now", "🚀", f"host:{int(slot)}")],
+                [premium_button("Setup Login", "🔐", f"login:{int(slot)}")],
+            ])
         )
         return ConversationHandler.END
     await update.message.reply_text("🔑 Now send your Telegram API hash.", parse_mode=ParseMode.HTML)
     return 3
-
 
 async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     api_hash = update.message.text.strip()
@@ -1115,20 +1248,20 @@ async def receive_api_hash(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await update.message.reply_text(
         f"✅ <b>API profile saved</b>\n\n"
         f"📄 <code>{esc(name)}</code> is ready to host.\n\n"
-        f"Your API profile will be reused for future uploads.",
+        f"Your API profile will be reused for future uploads.\n"
+        f"Use /login to set up Telegram session.",
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup([
             [premium_button("Host Now", "🚀", f"host:{int(slot)}")],
-            [premium_button("Delete", "🗑️", f"delete:{int(slot)}"), premium_button("Close", "❌", "close")],
+            [premium_button("Setup Login", "🔐", f"login:{int(slot)}"), premium_button("Delete", "🗑️", f"delete:{int(slot)}")],
+            [premium_button("Close", "❌", "close")],
         ]),
     )
     return ConversationHandler.END
 
-
 async def cancel_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     await update.effective_message.reply_text("🚫 Upload cancelled.")
     return ConversationHandler.END
-
 
 async def setapi(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
@@ -1162,7 +1295,6 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=script_keyboard(items, "restart"),
     )
 
-
 async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     items = get_scripts(update.effective_user.id)
     if not items:
@@ -1170,14 +1302,12 @@ async def restart_command(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     await update.message.reply_text(f"{TOP}\n│ ✦ <b>RESTART CENTER</b> ✦ │\n{BOT}\n\nSelect a hosted script:", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "restart"))
 
-
 async def logout_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     items = get_scripts(update.effective_user.id)
     if not items:
         await update.message.reply_text("📭 Nothing to logout/delete.")
         return
     await update.message.reply_text(f"{TOP}\n│ ✦ <b>LOGOUT CENTER</b> ✦ │\n{BOT}\n\nStop and permanently remove a script:", parse_mode=ParseMode.HTML, reply_markup=script_keyboard(items, "logout"))
-
 
 # ---------------------------------------------------------------------------
 # CALLBACKS
@@ -1250,6 +1380,12 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         shutil.rmtree(script_root(uid, slot), ignore_errors=True)
         await q.message.edit_text(f"🚪 <b>Script #{slot+1} removed.</b>", parse_mode=ParseMode.HTML)
         return
+    # NEW: handle login callback from upload flow
+    if data.startswith("login:"):
+        slot = int(data.split(":", 1)[1])
+        # Start login conversation from a callback is tricky; we'll forward to command.
+        await q.message.reply_text("Please use /login to set up your Telegram session.")
+        return
 
 # ---------------------------------------------------------------------------
 # EXTRA USER FUNCTIONS
@@ -1265,7 +1401,9 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"🚪 <code>/logout</code> — stop/remove a script\n"
         f"🎁 <code>/referral</code> — referral reward\n"
         f"👑 <code>/premium</code> — plan details\n"
-        f"🔐 <code>/setapi API_ID API_HASH</code> — save your API profile\n\n"
+        f"🔐 <code>/setapi API_ID API_HASH</code> — save your API profile\n"
+        f"🔐 <code>/login</code> — set up Telegram session (OTP + 2FA)\n"
+        f"🚫 <code>/logout_session</code> — clear stored session\n\n"
         f"Your upload is executed as a separate process with its own working directory.",
         parse_mode=ParseMode.HTML,
     )
@@ -1284,7 +1422,6 @@ async def api_status_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ Stored privately for your account.",
         parse_mode=ParseMode.HTML,
     )
-
 
 async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     uid = update.effective_user.id
@@ -1312,6 +1449,7 @@ async def logs_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         f"📜 <b>LOGS — #{slot}</b>\n\n<pre>{esc(tail)}</pre>",
         parse_mode=ParseMode.HTML,
     )
+
 # ---------------------------------------------------------------------------
 # ADMIN
 # ---------------------------------------------------------------------------
@@ -1326,7 +1464,6 @@ async def setwelcomevideo(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     JSONStore.save(WELCOME_FILE, {"file_id": reply.video.file_id})
     await update.message.reply_text("✅ Welcome video saved.")
 
-
 async def remove_welcomevideo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
         return
@@ -1335,7 +1472,6 @@ async def remove_welcomevideo(update: Update, context: ContextTypes.DEFAULT_TYPE
     except FileNotFoundError:
         pass
     await update.message.reply_text("✅ Welcome video removed.")
-
 
 async def admin_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -1350,7 +1486,6 @@ async def admin_premium(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     save_meta(uid, {"premium": True, "premium_reason": "admin", "premium_at": int(time.time())})
     await update.message.reply_text(f"✅ Premium enabled for {uid}.")
-
 
 async def admin_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -1368,7 +1503,6 @@ async def admin_revoke(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     meta["premium_reason"] = "revoked"
     save_meta(uid, meta)
     await update.message.reply_text(f"✅ Premium revoked for {uid}.")
-
 
 async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -1389,7 +1523,6 @@ async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception:
             continue
     await update.message.reply_text(f"✅ Broadcast sent to {sent} users.")
-
 
 async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -1417,8 +1550,9 @@ async def post_init(app: Application) -> None:
         ("referral", "Refer & earn Premium"),
         ("premium", "Premium information"),
         ("setapi", "Set your API profile"),
+        ("login", "Set up Telegram session (OTP)"),
+        ("logout_session", "Clear stored session"),
     ])
-
 
 def build_app() -> Application:
     if not BOT_TOKEN:
@@ -1428,6 +1562,7 @@ def build_app() -> Application:
 
     app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
 
+    # Upload conversation
     upload_conv = ConversationHandler(
         entry_points=[CommandHandler("host", begin_upload)],
         states={
@@ -1438,6 +1573,18 @@ def build_app() -> Application:
         fallbacks=[CommandHandler("cancel", cancel_upload)],
         allow_reentry=True,
     )
+    # NEW: Login conversation
+    login_conv = ConversationHandler(
+        entry_points=[CommandHandler("login", login_start)],
+        states={
+            LOGIN_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_phone)],
+            LOGIN_CODE: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_code)],
+            LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)],
+        },
+        fallbacks=[CommandHandler("cancel", login_cancel)],
+        allow_reentry=True,
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("referral", referral))
     app.add_handler(CommandHandler("premium", premium))
@@ -1449,6 +1596,8 @@ def build_app() -> Application:
     app.add_handler(CommandHandler("restart", restart_command))
     app.add_handler(CommandHandler("logout", logout_command))
     app.add_handler(upload_conv)
+    app.add_handler(login_conv)   # NEW
+    app.add_handler(CommandHandler("logout_session", logout_session))  # NEW
     app.add_handler(CommandHandler("setwelcomevideo", setwelcomevideo))
     app.add_handler(CommandHandler("removewelcomevideo", remove_welcomevideo))
     app.add_handler(CommandHandler("premium_user", admin_premium))
@@ -1458,12 +1607,10 @@ def build_app() -> Application:
     app.add_handler(CallbackQueryHandler(callbacks))
     return app
 
-
 def main() -> None:
     app = build_app()
-    log.info("SID Manual Userbot Hoster V10 started")
+    log.info("SID Manual Userbot Hoster V11 started")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
