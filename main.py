@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-SID MANUAL USERBOT HOSTER V12 – Integrated login + auto‑host
+SID MANUAL USERBOT HOSTER V12 – Integrated login + auto‑host (fixed session export)
 
 - Full upload flow: script → API ID → API hash → phone → OTP → password (if 2FA)
 - After login, the uploaded script is started automatically.
 - All user data (session, scripts, logs) is stored per user.
+- Works with all Telethon versions (uses client.session.save()).
 """
 
 import ast
@@ -46,8 +47,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # CONFIG
 # ---------------------------------------------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8602762499:AAHRU4hAlT6G94Iz5ZHmPEjekT80G5Z4fpk").strip()
-OWNER_ID = int(os.getenv("OWNER_ID", "2119464081") or 0)
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
+OWNER_ID = int(os.getenv("OWNER_ID", "0") or 0)
 SUPPORT_USERNAME = os.getenv("SUPPORT_USERNAME", "@support").strip()
 MAX_RUNNING = max(1, int(os.getenv("MAX_RUNNING", "50") or 50))
 FREE_SCRIPT_LIMIT = max(1, int(os.getenv("FREE_SCRIPT_LIMIT", "3") or 3))
@@ -82,6 +83,16 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 log = logging.getLogger("sid-hoster")
+
+# ---------------------------------------------------------------------------
+# HELPER: get session string (works with all Telethon versions)
+# ---------------------------------------------------------------------------
+def get_session_string(client) -> str:
+    """Return the session string from a connected Telethon client."""
+    try:
+        return client.export_session_string()
+    except AttributeError:
+        return client.session.save()
 
 # ---------------------------------------------------------------------------
 # VISUAL STYLE
@@ -239,7 +250,7 @@ def register_user(uid: int, name: str, referrer: Optional[int] = None) -> dict:
     return get_meta(uid)
 
 # ---------------------------------------------------------------------------
-# PROCESS MANAGER (unchanged from V11)
+# PROCESS MANAGER
 # ---------------------------------------------------------------------------
 PROCS: Dict[Tuple[int, int], asyncio.subprocess.Process] = {}
 START_TIMES: Dict[Tuple[int, int], float] = {}
@@ -571,7 +582,7 @@ async def health_loop(app: Application) -> None:
                         log.warning("health restart uid=%s slot=%s: %s", uid, slot, msg)
 
 # ---------------------------------------------------------------------------
-# SCRIPT SCANNER (unchanged)
+# SCRIPT SCANNER
 # ---------------------------------------------------------------------------
 API_ID_NAMES = {"API_ID", "api_id", "TG_API_ID", "TELEGRAM_API_ID", "CLIENT_API_ID"}
 API_HASH_NAMES = {"API_HASH", "api_hash", "TG_API_HASH", "TELEGRAM_API_HASH", "CLIENT_API_HASH"}
@@ -897,7 +908,7 @@ async def perform_login(
             except errors.SessionPasswordNeededError:
                 return True, "password_needed"
             # Success
-            session_string = await client.export_session_string()
+            session_string = get_session_string(client)
             session_path(uid).write_text(session_string, encoding="utf-8")
             await client.disconnect()
             context.user_data.pop("login_client", None)
@@ -906,7 +917,7 @@ async def perform_login(
         elif password is not None:
             # Verify 2FA
             await client.sign_in(password=password)
-            session_string = await client.export_session_string()
+            session_string = get_session_string(client)
             session_path(uid).write_text(session_string, encoding="utf-8")
             await client.disconnect()
             context.user_data.pop("login_client", None)
@@ -1184,7 +1195,7 @@ async def upload_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     try:
         await client.sign_in(phone=phone, code=code)
         # Success
-        session_string = await client.export_session_string()
+        session_string = get_session_string(client)
         uid = update.effective_user.id
         session_path(uid).write_text(session_string, encoding="utf-8")
         await client.disconnect()
@@ -1235,7 +1246,7 @@ async def upload_password(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     try:
         await client.sign_in(password=password)
-        session_string = await client.export_session_string()
+        session_string = get_session_string(client)
         uid = update.effective_user.id
         session_path(uid).write_text(session_string, encoding="utf-8")
         await client.disconnect()
@@ -1323,7 +1334,7 @@ async def login_code(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         await update.message.reply_text(f"❌ {e}")
         return LOGIN_CODE
     # success
-    session_string = await client.export_session_string()
+    session_string = get_session_string(client)
     uid = update.effective_user.id
     session_path(uid).write_text(session_string, encoding="utf-8")
     await client.disconnect()
@@ -1343,7 +1354,7 @@ async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         await update.message.reply_text(f"❌ {e}")
         return LOGIN_PASSWORD
-    session_string = await client.export_session_string()
+    session_string = get_session_string(client)
     uid = update.effective_user.id
     session_path(uid).write_text(session_string, encoding="utf-8")
     await client.disconnect()
@@ -1541,7 +1552,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await q.message.reply_text("Please use /login manually.")
 
 # ---------------------------------------------------------------------------
-# ADMIN COMMANDS (unchanged)
+# ADMIN COMMANDS
 # ---------------------------------------------------------------------------
 async def setwelcomevideo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id): return
